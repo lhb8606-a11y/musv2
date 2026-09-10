@@ -8,6 +8,7 @@ import os
 DATA_FILE = 'musv_tasks.csv'
 TAGS_FILE = 'musv_tags.txt'
 
+# 요청하신 5대 분류 완벽 반영
 CATEGORIES = {
     "1. 개요": ["1-1. 일정", "1-2. 회의"],
     "2. BCC": ["2-1. BCC", "2-2. 사급자재", "2-3. ECS PC", "2-4. 모니터"],
@@ -63,34 +64,34 @@ with st.sidebar.expander("🏷️ 새로운 태그 추가하기"):
         elif new_tag_input in current_tags:
             st.warning("이미 존재하는 태그입니다.")
 
-# 사이드바 2: 신규 업무 입력 폼
-with st.sidebar.form("task_form"):
-    st.subheader("새로운 업무 추가")
-    main_cat = st.selectbox("대분류", list(CATEGORIES.keys()))
-    sub_cat = st.selectbox("중분류", CATEGORIES[main_cat])
-    
-    # 캘린더 연속 표기를 위한 시작/종료일 지정
-    col1, col2 = st.columns(2)
-    start_date = col1.date_input("시작일 (작성일)", date.today())
-    end_date = col2.date_input("종료일 (마감일)", date.today())
-    
-    send_recv = st.selectbox("수신/발신", ["수신", "발신", "회의", "내부", "일정"])
-    content = st.text_area("업무 내용 (누구와 어디서 무엇을, 요청 자료 등)")
-    tags = st.multiselect("태그 선택 (위에서 추가한 태그 반영됨)", current_tags)
-    note = st.text_input("비고/결과물 요약")
-    
-    submitted = st.form_submit_button("일정 등록하기")
-    if submitted:
-        new_row = {
-            "대분류": main_cat, "중분류": sub_cat, 
-            "시작일": str(start_date), "종료일": str(end_date),
-            "수신/발신": send_recv, "내용": content, 
-            "태그": ", ".join(tags), "완료여부": "미완료", "비고": note
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        save_data(df)
-        st.success("업무가 성공적으로 등록되었습니다.")
-        st.rerun()
+# 사이드바 2: 신규 업무 입력 폼 (form 제거하여 실시간 연동 활성화)
+st.sidebar.subheader("새로운 업무 추가")
+
+# 대분류 선택 시 즉시 화면이 갱신되며 중분류가 업데이트 됩니다.
+main_cat = st.sidebar.selectbox("대분류", list(CATEGORIES.keys()))
+sub_cat = st.sidebar.selectbox("중분류", CATEGORIES[main_cat])
+
+col1, col2 = st.sidebar.columns(2)
+start_date = col1.date_input("시작일 (작성일)", date.today())
+end_date = col2.date_input("종료일 (마감일)", date.today())
+
+send_recv = st.sidebar.selectbox("수신/발신", ["수신", "발신", "회의", "내부", "일정"])
+content = st.sidebar.text_area("업무 내용 (누구와 어디서 무엇을, 요청 자료 등)")
+tags = st.sidebar.multiselect("태그 선택", current_tags)
+note = st.sidebar.text_input("비고/결과물 요약")
+
+# 버튼 클릭 시 데이터 저장
+if st.sidebar.button("일정 등록하기"):
+    new_row = {
+        "대분류": main_cat, "중분류": sub_cat, 
+        "시작일": str(start_date), "종료일": str(end_date),
+        "수신/발신": send_recv, "내용": content, 
+        "태그": ", ".join(tags), "완료여부": "미완료", "비고": note
+    }
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    save_data(df)
+    st.sidebar.success("업무가 성공적으로 등록되었습니다.")
+    st.rerun()
 
 # 4. 메인 화면 탭 구성
 tab1, tab2 = st.tabs(["🗓️ 일정 캘린더 (타임라인)", "📋 전체 업무 상세 표"])
@@ -101,10 +102,8 @@ with tab1:
     if not df.empty:
         timeline_df = df.copy()
         timeline_df['시작일'] = pd.to_datetime(timeline_df['시작일'])
-        # 일정이 시각적으로 잘 보이도록 종료일에 1일을 더해 연속된 막대로 표현
         timeline_df['시각화_종료일'] = pd.to_datetime(timeline_df['종료일']) + pd.Timedelta(days=1)
         
-        # Plotly를 활용한 간트(Gantt) 차트
         fig = px.timeline(
             timeline_df, 
             x_start="시작일", 
@@ -114,7 +113,7 @@ with tab1:
             hover_data=["중분류", "태그", "완료여부", "종료일"],
             title="대분류별 MUSV 업무 진행 기간"
         )
-        fig.update_yaxes(autorange="reversed") # 최신 항목이 위로 오도록 정렬
+        fig.update_yaxes(autorange="reversed")
         fig.update_layout(xaxis_title="날짜", yaxis_title="업무 내용", height=500)
         st.plotly_chart(fig, use_container_width=True)
     else:
