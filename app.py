@@ -38,15 +38,16 @@ def save_settings(settings):
 def load_data():
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
-        # [핵심 수정] CSV에서 불러올 때 날짜 컬럼을 명시적 datetime 타입으로 변환 (에러 방지)
-        date_columns = ['시작일', '목표일', '실제완료일']
-        for col in date_columns:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
-        return df
     else:
         cols = ["프로젝트", "업무유형", "대분류", "중분류", "시작일", "목표일", "실제완료일", "장소", "관련자(참석자/송수신자)", "내용(주제)", "회의록_및_비고", "태그", "상태"]
-        return pd.DataFrame(columns=cols)
+        df = pd.DataFrame(columns=cols)
+    
+    # [핵심 수정] 빈 값(None)으로 인한 오류 방지를 위해 명시적 datetime 타입으로 변환
+    date_columns = ['시작일', '목표일', '실제완료일']
+    for col in date_columns:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+    return df
 
 def save_data(df):
     df.to_csv(DATA_FILE, index=False)
@@ -64,7 +65,8 @@ proj_categories = settings[selected_project]["categories"]
 proj_tags = settings[selected_project]["tags"]
 
 if menu == "📊 대시보드 (업무 관리)":
-    st.title(f"🚢 {selected_project} 통합 업무 대시보드")
+    # 요청하신 대로 제목 단순화 반영
+    st.title("🚢 통합 업무 대시보드")
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("새로운 업무 등록")
@@ -99,7 +101,9 @@ if menu == "📊 대시보드 (업무 관리)":
         new_row = {
             "프로젝트": selected_project, "업무유형": activity_type,
             "대분류": main_cat, "중분류": sub_cat, 
-            "시작일": start_date, "목표일": target_date, "실제완료일": None,
+            "시작일": pd.to_datetime(start_date), 
+            "목표일": pd.to_datetime(target_date), 
+            "실제완료일": pd.NaT,  # [핵심 수정] None 대신 Pandas의 빈 시간값(NaT) 적용
             "장소": location, "관련자(참석자/송수신자)": people, "내용(주제)": content, 
             "회의록_및_비고": note, "태그": ", ".join(tags), "상태": "진행중"
         }
@@ -133,6 +137,7 @@ if menu == "📊 대시보드 (업무 관리)":
         )
         
         if not edited_df.equals(display_df):
+            # 사용자가 표에서 수정한 값을 원본 df에 안전하게 반영
             df.update(edited_df)
             save_data(df)
             st.rerun()
@@ -140,7 +145,7 @@ if menu == "📊 대시보드 (업무 관리)":
     with tab2:
         if not project_df.empty:
             timeline_df = project_df.copy()
-            # 타임라인 차트를 위해 datetime 변환
+            # 타임라인 차트 표시를 위해 종료일에 하루 추가 (시각적 개선)
             timeline_df['시작일'] = pd.to_datetime(timeline_df['시작일'])
             timeline_df['시각화_종료일'] = pd.to_datetime(timeline_df['목표일']) + pd.Timedelta(days=1)
             
@@ -157,7 +162,7 @@ if menu == "📊 대시보드 (업무 관리)":
 
 elif menu == "⚙️ 관리자 설정 (분류/태그)":
     st.title("⚙️ 시스템 관리자 페이지")
-    # 신규 프로젝트 생성
+    # 신규 프로젝트 생성 로직
     new_project = st.text_input("새로운 프로젝트 이름")
     if st.button("프로젝트 생성"):
         if new_project and new_project not in settings:
