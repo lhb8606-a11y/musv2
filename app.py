@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
-import plotly.express as px
+from datetime import date, timedelta
 import os
 import json
 
@@ -42,7 +41,6 @@ def load_data():
         cols = ["프로젝트", "업무유형", "대분류", "중분류", "시작일", "목표일", "실제완료일", "장소", "관련자(참석자/송수신자)", "내용(주제)", "회의록_및_비고", "태그", "상태"]
         df = pd.DataFrame(columns=cols)
     
-    # [핵심 수정] 빈 값(None)으로 인한 오류 방지를 위해 명시적 datetime 타입으로 변환
     date_columns = ['시작일', '목표일', '실제완료일']
     for col in date_columns:
         if col in df.columns:
@@ -52,7 +50,51 @@ def load_data():
 def save_data(df):
     df.to_csv(DATA_FILE, index=False)
 
-st.set_page_config(page_title="PM 통합 업무 대시보드", layout="wide")
+# 2. 6주 캘린더 생성 함수 (HTML/CSS 렌더링)
+def generate_calendar_html(df, base_date):
+    # 1일이 속한 주의 일요일 계산
+    first_day = base_date.replace(day=1)
+    start_date = first_day - timedelta(days=first_day.weekday() + 1) if first_day.weekday() != 6 else first_day
+    
+    html = "<table style='width:100%; border-collapse: collapse; font-family: sans-serif; font-size:13px;'>"
+    html += "<tr style='background-color:#f0f2f6; text-align:center; height:40px;'>"
+    html += "<th style='width:5%; color:#555;'>주차</th>"
+    html += "<th style='width:13.5%; color:#e52528;'>일</th><th style='width:13.5%;'>월</th><th style='width:13.5%;'>화</th><th style='width:13.5%;'>수</th><th style='width:13.5%;'>목</th><th style='width:13.5%;'>금</th><th style='width:13.5%; color:#1890ff;'>토</th></tr>"
+    
+    curr_date = start_date
+    today = date.today()
+    valid_df = df.dropna(subset=['시작일', '목표일'])
+    
+    for _ in range(6):
+        # 해당 주의 목요일 기준으로 주차 계산
+        thursday = curr_date + timedelta(days=4)
+        week_num = thursday.isocalendar()[1]
+        
+        html += "<tr>"
+        html += f"<td style='border:1px solid #ddd; text-align:center; background-color:#fafafa; font-weight:bold; color:#777;'>{week_num}주</td>"
+        
+        for i in range(7):
+            is_today = (curr_date == today)
+            bg = "#e6f7ff" if is_today else "#ffffff"
+            text_color = "#bfbfbf" if curr_date.month != base_date.month else ("#e52528" if i==0 else ("#1890ff" if i==6 else "#262730"))
+            
+            html += f"<td style='border:1px solid #ddd; height:120px; vertical-align:top; background-color:{bg}; padding:6px;'>"
+            html += f"<div style='font-weight:bold; color:{text_color}; margin-bottom:4px;'>{curr_date.day}</div>"
+            
+            # 날짜 내 포함되는 일정 렌더링
+            if not valid_df.empty:
+                day_tasks = valid_df[(valid_df['시작일'] <= pd.Timestamp(curr_date)) & (valid_df['목표일'] >= pd.Timestamp(curr_date))]
+                for _, task in day_tasks.iterrows():
+                    bg_color = "#52c41a" if task['상태'] == "완료" else ("#f5222d" if task['상태'] == "지연" else "#1890ff")
+                    html += f"<div style='background-color:{bg_color}; color:white; border-radius:3px; padding:2px 5px; margin-bottom:2px; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{task['내용(주제)']}'>{task['내용(주제)']}</div>"
+                    
+            html += "</td>"
+            curr_date += timedelta(days=1)
+        html += "</tr>"
+    html += "</table>"
+    return html
+
+st.set_page_config(page_title="통합 업무 대시보드", layout="wide")
 settings = load_settings()
 df = load_data()
 
@@ -65,14 +107,11 @@ proj_categories = settings[selected_project]["categories"]
 proj_tags = settings[selected_project]["tags"]
 
 if menu == "📊 대시보드 (업무 관리)":
-    # 요청하신 대로 제목 단순화 반영
     st.title("🚢 통합 업무 대시보드")
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("새로운 업무 등록")
-    
     activity_type = st.sidebar.selectbox("업무 유형 선택", ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"])
-    
     main_cat = st.sidebar.selectbox("대분류", list(proj_categories.keys()))
     sub_cat = st.sidebar.selectbox("중분류", proj_categories[main_cat] if proj_categories[main_cat] else ["없음"])
     
@@ -80,19 +119,19 @@ if menu == "📊 대시보드 (업무 관리)":
     target_date = st.sidebar.date_input("목표일 (예상 종료일)", date.today())
     
     if activity_type == "회의 진행":
-        location = st.sidebar.text_input("회의 장소 (예: 동화엔텍, 유일조선소)")
-        people = st.sidebar.text_input("참석자 (예: 한화시스템 이태경 수석 등)")
+        location = st.sidebar.text_input("회의 장소")
+        people = st.sidebar.text_input("참석자")
         content = st.sidebar.text_input("회의 주제")
-        note = st.sidebar.text_area("회의록 요약 (완료 후 표에서도 수정 가능)")
+        note = st.sidebar.text_area("회의록 요약")
     elif activity_type == "메일/자료 송수신":
         location = "-"
-        people = st.sidebar.text_input("송수신자 (예: 극동선박설계 배상권 전무)")
-        content = st.sidebar.text_area("주고받은 메일/자료 내용")
-        note = st.sidebar.text_input("비고 (첨부파일명 등)")
+        people = st.sidebar.text_input("송수신자")
+        content = st.sidebar.text_area("메일/자료 내용")
+        note = st.sidebar.text_input("비고")
     else:
         location = "-"
         people = st.sidebar.text_input("담당자 / 관련자")
-        content = st.sidebar.text_area("업무 내용 (H/W 설계, 도면 작성 등)")
+        content = st.sidebar.text_area("업무 내용")
         note = st.sidebar.text_input("비고")
         
     tags = st.sidebar.multiselect("태그 선택", proj_tags)
@@ -101,9 +140,7 @@ if menu == "📊 대시보드 (업무 관리)":
         new_row = {
             "프로젝트": selected_project, "업무유형": activity_type,
             "대분류": main_cat, "중분류": sub_cat, 
-            "시작일": pd.to_datetime(start_date), 
-            "목표일": pd.to_datetime(target_date), 
-            "실제완료일": pd.NaT,  # [핵심 수정] None 대신 Pandas의 빈 시간값(NaT) 적용
+            "시작일": pd.to_datetime(start_date), "목표일": pd.to_datetime(target_date), "실제완료일": pd.NaT,
             "장소": location, "관련자(참석자/송수신자)": people, "내용(주제)": content, 
             "회의록_및_비고": note, "태그": ", ".join(tags), "상태": "진행중"
         }
@@ -114,9 +151,19 @@ if menu == "📊 대시보드 (업무 관리)":
 
     project_df = df[df['프로젝트'] == selected_project].copy()
 
-    tab1, tab2 = st.tabs(["📋 상세 업무 표 (진행 상태 & 회의록 수정)", "🗓️ 일정 캘린더 (타임라인)"])
+    tab1, tab2 = st.tabs(["🗓️ 월간 캘린더 (6주)", "📋 상세 업무 표 (진행 상태 & 회의록 수정)"])
 
     with tab1:
+        st.subheader("업무 일정 캘린더")
+        col_cal1, col_cal2 = st.columns([1, 4])
+        with col_cal1:
+            base_calendar_date = st.date_input("조회 기준 월 선택", date.today())
+        
+        # HTML 캘린더 렌더링
+        calendar_html = generate_calendar_html(project_df, base_calendar_date)
+        st.markdown(calendar_html, unsafe_allow_html=True)
+
+    with tab2:
         st.subheader("업무 표 (더블 클릭하여 완료일 및 회의록 입력)")
         selected_filter_tags = st.multiselect("조회할 태그 필터", proj_tags)
         
@@ -137,32 +184,12 @@ if menu == "📊 대시보드 (업무 관리)":
         )
         
         if not edited_df.equals(display_df):
-            # 사용자가 표에서 수정한 값을 원본 df에 안전하게 반영
             df.update(edited_df)
             save_data(df)
             st.rerun()
 
-    with tab2:
-        if not project_df.empty:
-            timeline_df = project_df.copy()
-            # 타임라인 차트 표시를 위해 종료일에 하루 추가 (시각적 개선)
-            timeline_df['시작일'] = pd.to_datetime(timeline_df['시작일'])
-            timeline_df['시각화_종료일'] = pd.to_datetime(timeline_df['목표일']) + pd.Timedelta(days=1)
-            
-            fig = px.timeline(
-                timeline_df, x_start="시작일", x_end="시각화_종료일", y="내용(주제)", color="상태",
-                hover_data=["업무유형", "관련자(참석자/송수신자)", "목표일", "실제완료일"], 
-                title=f"{selected_project} 전체 공정 타임라인"
-            )
-            fig.update_yaxes(autorange="reversed")
-            fig.update_layout(xaxis_title="날짜", yaxis_title="업무", height=500)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("등록된 일정이 없습니다.")
-
 elif menu == "⚙️ 관리자 설정 (분류/태그)":
     st.title("⚙️ 시스템 관리자 페이지")
-    # 신규 프로젝트 생성 로직
     new_project = st.text_input("새로운 프로젝트 이름")
     if st.button("프로젝트 생성"):
         if new_project and new_project not in settings:
@@ -176,7 +203,7 @@ elif menu == "⚙️ 관리자 설정 (분류/태그)":
     col_main, col_sub = st.columns(2)
     with col_main:
         st.markdown("**새로운 대분류 추가**")
-        new_main_cat = st.text_input("대분류명 입력 (예: 6. 테스트)")
+        new_main_cat = st.text_input("대분류명 입력")
         if st.button("대분류 추가"):
             if new_main_cat and new_main_cat not in settings[selected_project]["categories"]:
                 settings[selected_project]["categories"][new_main_cat] = []
@@ -204,6 +231,3 @@ elif menu == "⚙️ 관리자 설정 (분류/태그)":
             save_settings(settings)
             st.success("태그가 추가되었습니다.")
             st.rerun()
-    
-    st.markdown("**현재 등록된 태그 목록:**")
-    st.write(", ".join(proj_tags) if proj_tags else "등록된 태그가 없습니다.")
