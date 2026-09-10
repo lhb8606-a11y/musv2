@@ -5,7 +5,7 @@ import plotly.express as px
 import os
 import json
 
-# 1. 파일 경로 설정 (구조 변경으로 인한 v2 적용)
+# 1. 파일 경로 설정
 DATA_FILE = 'all_tasks_v2.csv'
 SETTINGS_FILE = 'settings.json'
 
@@ -37,9 +37,14 @@ def save_settings(settings):
 
 def load_data():
     if os.path.exists(DATA_FILE):
-        return pd.read_csv(DATA_FILE)
+        df = pd.read_csv(DATA_FILE)
+        # [핵심 수정] CSV에서 불러올 때 날짜 컬럼을 명시적 datetime 타입으로 변환 (에러 방지)
+        date_columns = ['시작일', '목표일', '실제완료일']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+        return df
     else:
-        # 데이터 구조 전면 개편 (관련자, 장소, 목표일, 실제완료일 추가)
         cols = ["프로젝트", "업무유형", "대분류", "중분류", "시작일", "목표일", "실제완료일", "장소", "관련자(참석자/송수신자)", "내용(주제)", "회의록_및_비고", "태그", "상태"]
         return pd.DataFrame(columns=cols)
 
@@ -64,7 +69,6 @@ if menu == "📊 대시보드 (업무 관리)":
     st.sidebar.markdown("---")
     st.sidebar.subheader("새로운 업무 등록")
     
-    # [핵심 1] 업무 유형에 따른 동적 폼 생성
     activity_type = st.sidebar.selectbox("업무 유형 선택", ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"])
     
     main_cat = st.sidebar.selectbox("대분류", list(proj_categories.keys()))
@@ -73,7 +77,6 @@ if menu == "📊 대시보드 (업무 관리)":
     start_date = st.sidebar.date_input("시작일 (작성일)", date.today())
     target_date = st.sidebar.date_input("목표일 (예상 종료일)", date.today())
     
-    # 업무 유형별 맞춤 입력 칸
     if activity_type == "회의 진행":
         location = st.sidebar.text_input("회의 장소 (예: 동화엔텍, 유일조선소)")
         people = st.sidebar.text_input("참석자 (예: 한화시스템 이태경 수석 등)")
@@ -96,7 +99,7 @@ if menu == "📊 대시보드 (업무 관리)":
         new_row = {
             "프로젝트": selected_project, "업무유형": activity_type,
             "대분류": main_cat, "중분류": sub_cat, 
-            "시작일": str(start_date), "목표일": str(target_date), "실제완료일": None,
+            "시작일": start_date, "목표일": target_date, "실제완료일": None,
             "장소": location, "관련자(참석자/송수신자)": people, "내용(주제)": content, 
             "회의록_및_비고": note, "태그": ", ".join(tags), "상태": "진행중"
         }
@@ -112,13 +115,14 @@ if menu == "📊 대시보드 (업무 관리)":
     with tab1:
         st.subheader("업무 표 (더블 클릭하여 완료일 및 회의록 입력)")
         selected_filter_tags = st.multiselect("조회할 태그 필터", proj_tags)
+        
+        display_df = project_df.copy()
         if selected_filter_tags:
             pattern = '|'.join(selected_filter_tags)
-            project_df = project_df[project_df['태그'].str.contains(pattern, na=False)]
+            display_df = display_df[display_df['태그'].str.contains(pattern, na=False)]
         
-        # [핵심 2] Data Editor를 통한 달력(Date) 입력 및 진행상태 업데이트
         edited_df = st.data_editor(
-            project_df,
+            display_df,
             column_config={
                 "상태": st.column_config.SelectboxColumn("상태", options=["진행중", "완료", "지연"]),
                 "실제완료일": st.column_config.DateColumn("실제완료일 (달력선택)"),
@@ -128,7 +132,7 @@ if menu == "📊 대시보드 (업무 관리)":
             use_container_width=True, hide_index=True
         )
         
-        if not edited_df.equals(project_df):
+        if not edited_df.equals(display_df):
             df.update(edited_df)
             save_data(df)
             st.rerun()
@@ -136,8 +140,8 @@ if menu == "📊 대시보드 (업무 관리)":
     with tab2:
         if not project_df.empty:
             timeline_df = project_df.copy()
+            # 타임라인 차트를 위해 datetime 변환
             timeline_df['시작일'] = pd.to_datetime(timeline_df['시작일'])
-            # 간트 차트는 '목표일'을 기준으로 막대를 생성합니다.
             timeline_df['시각화_종료일'] = pd.to_datetime(timeline_df['목표일']) + pd.Timedelta(days=1)
             
             fig = px.timeline(
@@ -153,7 +157,7 @@ if menu == "📊 대시보드 (업무 관리)":
 
 elif menu == "⚙️ 관리자 설정 (분류/태그)":
     st.title("⚙️ 시스템 관리자 페이지")
-    # ... (기존과 동일한 프로젝트/분류/태그 관리 로직 유지)
+    # 신규 프로젝트 생성
     new_project = st.text_input("새로운 프로젝트 이름")
     if st.button("프로젝트 생성"):
         if new_project and new_project not in settings:
@@ -161,3 +165,40 @@ elif menu == "⚙️ 관리자 설정 (분류/태그)":
             save_settings(settings)
             st.success("생성 완료")
             st.rerun()
+            
+    st.markdown("---")
+    st.subheader(f"2. [{selected_project}] 분류 체계 관리")
+    col_main, col_sub = st.columns(2)
+    with col_main:
+        st.markdown("**새로운 대분류 추가**")
+        new_main_cat = st.text_input("대분류명 입력 (예: 6. 테스트)")
+        if st.button("대분류 추가"):
+            if new_main_cat and new_main_cat not in settings[selected_project]["categories"]:
+                settings[selected_project]["categories"][new_main_cat] = []
+                save_settings(settings)
+                st.success("추가되었습니다.")
+                st.rerun()
+    with col_sub:
+        st.markdown("**기존 대분류에 중분류 추가**")
+        if proj_categories:
+            target_main = st.selectbox("어느 대분류에 추가하시겠습니까?", list(proj_categories.keys()))
+            new_sub_cat = st.text_input("중분류명 입력")
+            if st.button("중분류 추가"):
+                if new_sub_cat and new_sub_cat not in settings[selected_project]["categories"][target_main]:
+                    settings[selected_project]["categories"][target_main].append(new_sub_cat)
+                    save_settings(settings)
+                    st.success("추가되었습니다.")
+                    st.rerun()
+
+    st.markdown("---")
+    st.subheader(f"3. [{selected_project}] 태그 관리")
+    new_tag = st.text_input("새로운 태그 입력")
+    if st.button("태그 추가"):
+        if new_tag and new_tag not in settings[selected_project]["tags"]:
+            settings[selected_project]["tags"].append(new_tag)
+            save_settings(settings)
+            st.success("태그가 추가되었습니다.")
+            st.rerun()
+    
+    st.markdown("**현재 등록된 태그 목록:**")
+    st.write(", ".join(proj_tags) if proj_tags else "등록된 태그가 없습니다.")
