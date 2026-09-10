@@ -50,11 +50,21 @@ def load_data():
 def save_data(df):
     df.to_csv(DATA_FILE, index=False)
 
-# 2. 6주 캘린더 생성 함수 (HTML/CSS 렌더링)
+# [핵심] 달력 오늘 날짜 복귀를 위한 세션 상태 관리
+if 'cal_base_date' not in st.session_state:
+    st.session_state.cal_base_date = date.today()
+
+def set_today():
+    st.session_state.cal_base_date = date.today()
+
+# [핵심] 과거 2주 ~ 미래 3주 (총 6주) 달력 렌더링 함수
 def generate_calendar_html(df, base_date):
-    # 1일이 속한 주의 일요일 계산
-    first_day = base_date.replace(day=1)
-    start_date = first_day - timedelta(days=first_day.weekday() + 1) if first_day.weekday() != 6 else first_day
+    # 기준일이 속한 주의 일요일 계산
+    idx = (base_date.weekday() + 1) % 7
+    current_sunday = base_date - timedelta(days=idx)
+    
+    # 시작일을 현재 주차 일요일에서 2주 전으로 설정
+    start_date = current_sunday - timedelta(weeks=2)
     
     html = "<table style='width:100%; border-collapse: collapse; font-family: sans-serif; font-size:13px;'>"
     html += "<tr style='background-color:#f0f2f6; text-align:center; height:40px;'>"
@@ -66,7 +76,6 @@ def generate_calendar_html(df, base_date):
     valid_df = df.dropna(subset=['시작일', '목표일'])
     
     for _ in range(6):
-        # 해당 주의 목요일 기준으로 주차 계산
         thursday = curr_date + timedelta(days=4)
         week_num = thursday.isocalendar()[1]
         
@@ -75,13 +84,13 @@ def generate_calendar_html(df, base_date):
         
         for i in range(7):
             is_today = (curr_date == today)
+            # 오늘 날짜는 배경색 하이라이트
             bg = "#e6f7ff" if is_today else "#ffffff"
-            text_color = "#bfbfbf" if curr_date.month != base_date.month else ("#e52528" if i==0 else ("#1890ff" if i==6 else "#262730"))
+            text_color = "#e52528" if i==0 else ("#1890ff" if i==6 else "#262730")
             
             html += f"<td style='border:1px solid #ddd; height:120px; vertical-align:top; background-color:{bg}; padding:6px;'>"
-            html += f"<div style='font-weight:bold; color:{text_color}; margin-bottom:4px;'>{curr_date.day}</div>"
+            html += f"<div style='font-weight:bold; color:{text_color}; margin-bottom:4px;'>{curr_date.month}/{curr_date.day}</div>"
             
-            # 날짜 내 포함되는 일정 렌더링
             if not valid_df.empty:
                 day_tasks = valid_df[(valid_df['시작일'] <= pd.Timestamp(curr_date)) & (valid_df['목표일'] >= pd.Timestamp(curr_date))]
                 for _, task in day_tasks.iterrows():
@@ -151,16 +160,22 @@ if menu == "📊 대시보드 (업무 관리)":
 
     project_df = df[df['프로젝트'] == selected_project].copy()
 
-    tab1, tab2 = st.tabs(["🗓️ 월간 캘린더 (6주)", "📋 상세 업무 표 (진행 상태 & 회의록 수정)"])
+    tab1, tab2 = st.tabs(["🗓️ 월간 캘린더 (실전 6주)", "📋 상세 업무 표 (진행 상태 & 회의록 수정)"])
 
     with tab1:
         st.subheader("업무 일정 캘린더")
-        col_cal1, col_cal2 = st.columns([1, 4])
-        with col_cal1:
-            base_calendar_date = st.date_input("조회 기준 월 선택", date.today())
+        col_cal1, col_cal2, col_cal3 = st.columns([2, 1, 7])
         
-        # HTML 캘린더 렌더링
-        calendar_html = generate_calendar_html(project_df, base_calendar_date)
+        with col_cal1:
+            # 세션 상태에 저장된 날짜를 기본값으로 사용
+            st.date_input("조회 기준일 선택", key='cal_base_date')
+        with col_cal2:
+            st.write("") # 간격 맞춤
+            st.write("")
+            st.button("🎯 오늘로 바로 가기", on_click=set_today)
+        
+        # 선택된 날짜(과거2주 ~ 미래3주)를 기준으로 HTML 캘린더 렌더링
+        calendar_html = generate_calendar_html(project_df, st.session_state.cal_base_date)
         st.markdown(calendar_html, unsafe_allow_html=True)
 
     with tab2:
