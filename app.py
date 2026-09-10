@@ -50,20 +50,15 @@ def load_data():
 def save_data(df):
     df.to_csv(DATA_FILE, index=False)
 
-# [핵심] 달력 오늘 날짜 복귀를 위한 세션 상태 관리
 if 'cal_base_date' not in st.session_state:
     st.session_state.cal_base_date = date.today()
 
 def set_today():
     st.session_state.cal_base_date = date.today()
 
-# [핵심] 과거 2주 ~ 미래 3주 (총 6주) 달력 렌더링 함수
 def generate_calendar_html(df, base_date):
-    # 기준일이 속한 주의 일요일 계산
     idx = (base_date.weekday() + 1) % 7
     current_sunday = base_date - timedelta(days=idx)
-    
-    # 시작일을 현재 주차 일요일에서 2주 전으로 설정
     start_date = current_sunday - timedelta(weeks=2)
     
     html = "<table style='width:100%; border-collapse: collapse; font-family: sans-serif; font-size:13px;'>"
@@ -84,7 +79,6 @@ def generate_calendar_html(df, base_date):
         
         for i in range(7):
             is_today = (curr_date == today)
-            # 오늘 날짜는 배경색 하이라이트
             bg = "#e6f7ff" if is_today else "#ffffff"
             text_color = "#e52528" if i==0 else ("#1890ff" if i==6 else "#262730")
             
@@ -160,48 +154,105 @@ if menu == "📊 대시보드 (업무 관리)":
 
     project_df = df[df['프로젝트'] == selected_project].copy()
 
-    tab1, tab2 = st.tabs(["🗓️ 월간 캘린더 (실전 6주)", "📋 상세 업무 표 (진행 상태 & 회의록 수정)"])
+    tab1, tab2 = st.tabs(["🗓️ 월간 캘린더 (실전 6주)", "📋 상세 업무 표 (조회 및 전체 수정)"])
 
     with tab1:
         st.subheader("업무 일정 캘린더")
         col_cal1, col_cal2, col_cal3 = st.columns([2, 1, 7])
-        
         with col_cal1:
-            # 세션 상태에 저장된 날짜를 기본값으로 사용
             st.date_input("조회 기준일 선택", key='cal_base_date')
         with col_cal2:
-            st.write("") # 간격 맞춤
+            st.write("")
             st.write("")
             st.button("🎯 오늘로 바로 가기", on_click=set_today)
         
-        # 선택된 날짜(과거2주 ~ 미래3주)를 기준으로 HTML 캘린더 렌더링
         calendar_html = generate_calendar_html(project_df, st.session_state.cal_base_date)
         st.markdown(calendar_html, unsafe_allow_html=True)
 
     with tab2:
-        st.subheader("업무 표 (더블 클릭하여 완료일 및 회의록 입력)")
+        st.subheader("업무 표 (원하는 항목을 클릭하면 아래에서 전체 내용을 수정할 수 있습니다)")
         selected_filter_tags = st.multiselect("조회할 태그 필터", proj_tags)
         
         display_df = project_df.copy()
         if selected_filter_tags:
             pattern = '|'.join(selected_filter_tags)
             display_df = display_df[display_df['태그'].str.contains(pattern, na=False)]
+            
+        # [핵심 1] 열 순서 재배치 (상태를 제일 앞으로, 프로젝트를 제일 뒤로)
+        col_order = ['상태', '업무유형', '대분류', '중분류', '시작일', '목표일', '실제완료일', 
+                     '장소', '관련자(참석자/송수신자)', '내용(주제)', '회의록_및_비고', '태그', '프로젝트']
         
-        edited_df = st.data_editor(
+        # 프로젝트 열은 가장 뒤로 가고, 실제로 표출될 때는 생략해도 되지만 요청대로 맨 뒤로 배치합니다.
+        display_df = display_df[col_order]
+        
+        # [핵심 2] 행을 클릭(선택)할 수 있는 대화형 데이터프레임
+        event = st.dataframe(
             display_df,
-            column_config={
-                "상태": st.column_config.SelectboxColumn("상태", options=["진행중", "완료", "지연"]),
-                "실제완료일": st.column_config.DateColumn("실제완료일 (달력선택)"),
-                "회의록_및_비고": st.column_config.TextColumn("회의록_및_비고")
-            },
-            disabled=["프로젝트", "업무유형", "대분류", "중분류", "시작일", "목표일", "장소", "관련자(참석자/송수신자)", "내용(주제)", "태그"],
-            use_container_width=True, hide_index=True
+            on_select="rerun",
+            selection_mode="single-row",
+            use_container_width=True,
+            hide_index=True
         )
         
-        if not edited_df.equals(display_df):
-            df.update(edited_df)
-            save_data(df)
-            st.rerun()
+        # 행이 선택되었을 때 상세 수정 창 표시
+        if len(event.selection.rows) > 0:
+            selected_row_idx = event.selection.rows[0]
+            actual_idx = display_df.index[selected_row_idx]
+            task_data = display_df.loc[actual_idx]
+            
+            st.markdown("---")
+            st.subheader("📝 선택한 업무 상세 보기 및 전체 수정")
+            
+            with st.form("edit_form"):
+                col_e1, col_e2, col_e3 = st.columns(3)
+                edit_status = col_e1.selectbox("상태", ["진행중", "완료", "지연"], index=["진행중", "완료", "지연"].index(task_data['상태']))
+                edit_type = col_e2.selectbox("업무유형", ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"], index=["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"].index(task_data['업무유형']))
+                
+                # 날짜 데이터 안전 처리
+                s_date = task_data['시작일'] if pd.notna(task_data['시작일']) else date.today()
+                t_date = task_data['목표일'] if pd.notna(task_data['목표일']) else date.today()
+                r_date = task_data['실제완료일'] if pd.notna(task_data['실제완료일']) else None
+                
+                edit_s_date = col_e1.date_input("시작일", s_date)
+                edit_t_date = col_e2.date_input("목표일", t_date)
+                edit_r_date = col_e3.date_input("실제완료일", value=r_date)
+
+                col_e4, col_e5 = st.columns(2)
+                
+                main_cat_idx = list(proj_categories.keys()).index(task_data['대분류']) if task_data['대분류'] in proj_categories else 0
+                edit_main_cat = col_e4.selectbox("대분류", list(proj_categories.keys()), index=main_cat_idx)
+                
+                sub_cats = proj_categories.get(edit_main_cat, ["없음"])
+                sub_cat_idx = sub_cats.index(task_data['중분류']) if task_data['중분류'] in sub_cats else 0
+                edit_sub_cat = col_e5.selectbox("중분류", sub_cats, index=sub_cat_idx)
+                
+                edit_loc = st.text_input("장소", str(task_data['장소']) if pd.notna(task_data['장소']) else "")
+                edit_people = st.text_input("관련자(참석자/송수신자)", str(task_data['관련자(참석자/송수신자)']) if pd.notna(task_data['관련자(참석자/송수신자)']) else "")
+                edit_content = st.text_area("내용(주제)", str(task_data['내용(주제)']) if pd.notna(task_data['내용(주제)']) else "")
+                edit_note = st.text_area("회의록 및 비고", str(task_data['회의록_및_비고']) if pd.notna(task_data['회의록_및_비고']) else "", height=150)
+                
+                # 기존 태그 복원
+                current_tags = [t.strip() for t in str(task_data['태그']).split(",")] if pd.notna(task_data['태그']) and task_data['태그'] else []
+                valid_tags = [t for t in current_tags if t in proj_tags]
+                edit_tags = st.multiselect("태그", proj_tags, default=valid_tags)
+                
+                if st.form_submit_button("변경 사항 저장"):
+                    df.at[actual_idx, '상태'] = edit_status
+                    df.at[actual_idx, '업무유형'] = edit_type
+                    df.at[actual_idx, '대분류'] = edit_main_cat
+                    df.at[actual_idx, '중분류'] = edit_sub_cat
+                    df.at[actual_idx, '시작일'] = pd.to_datetime(edit_s_date)
+                    df.at[actual_idx, '목표일'] = pd.to_datetime(edit_t_date)
+                    df.at[actual_idx, '실제완료일'] = pd.to_datetime(edit_r_date) if edit_r_date else pd.NaT
+                    df.at[actual_idx, '장소'] = edit_loc
+                    df.at[actual_idx, '관련자(참석자/송수신자)'] = edit_people
+                    df.at[actual_idx, '내용(주제)'] = edit_content
+                    df.at[actual_idx, '회의록_및_비고'] = edit_note
+                    df.at[actual_idx, '태그'] = ", ".join(edit_tags)
+                    
+                    save_data(df)
+                    st.success("업무 내용이 성공적으로 수정되었습니다.")
+                    st.rerun()
 
 elif menu == "⚙️ 관리자 설정 (분류/태그)":
     st.title("⚙️ 시스템 관리자 페이지")
