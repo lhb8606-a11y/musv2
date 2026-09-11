@@ -29,7 +29,7 @@ DEFAULT_SETTINGS = {
         "email": "lhb8606@gmail.com",
         "app_password": "",
         "label": "업무-musv2",
-        "target_sender": "hblee@dh.co.kr" # 발신자 고정 설정 추가
+        "target_sender": "hblee@dh.co.kr"
     }
 }
 
@@ -39,7 +39,6 @@ def load_settings():
             data = json.load(f)
             if "gmail_settings" not in data:
                 data["gmail_settings"] = {"email": "lhb8606@gmail.com", "app_password": "", "label": "업무-musv2", "target_sender": "hblee@dh.co.kr"}
-            # 기존 설정 파일에 target_sender가 없을 경우 대비
             elif "target_sender" not in data["gmail_settings"]:
                 data["gmail_settings"]["target_sender"] = "hblee@dh.co.kr"
                 
@@ -109,14 +108,19 @@ def get_email_body(msg):
             pass
     return ""
 
-# [핵심 수정] Gmail 연동 시 발신자(target_sender) 조건 추가
+# [오류 해결] Gmail 연동 함수 수정
 def fetch_musv_emails(email_user, app_password, label, target_sender):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(email_user, app_password)
-        mail.select('"[Gmail]/All Mail"') 
         
-        # 라벨과 발신자를 동시에 필터링하는 Gmail 고유 검색어 조합
+        # 언어 설정과 무관하게 작동하는 범용 INBOX 선택
+        status, _ = mail.select("INBOX")
+        if status != "OK":
+            st.error("메일함을 선택할 수 없습니다. 계정 설정을 확인해 주세요.")
+            return []
+            
+        # 발신자 및 라벨 동시 필터링
         search_query = f'X-GM-RAW "from:{target_sender} label:{label}"'
         status, messages = mail.search(None, search_query)
         
@@ -290,8 +294,7 @@ elif menu == "📩 이메일 연동함":
         g_app_pw = st.text_input("앱 비밀번호 (16자리)", value=g_settings.get("app_password", ""), type="password")
         g_label = st.text_input("가져올 라벨 이름", value=g_settings.get("label", "업무-musv2"))
         
-        # [핵심 추가] 특정 발신자 고정 기능
-        g_target = st.text_input("고정 발신자 이메일 (이 계정에서 보낸 메일만 가져옴)", value=g_settings.get("target_sender", "hblee@dh.co.kr"))
+        g_target = st.text_input("고정 발신자 이메일", value=g_settings.get("target_sender", "hblee@dh.co.kr"))
         
         if st.button("설정 저장"):
             settings["gmail_settings"] = {"email": g_email, "app_password": g_app_pw, "label": g_label, "target_sender": g_target}
