@@ -38,7 +38,6 @@ def load_settings():
         with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if "gmail_settings" not in data:
-                # 사진을 참고하여 기본 라벨을 '업무/MUSV-2', 발신자를 'hblee@dh.co.kr OR 이헌범'으로 업데이트
                 data["gmail_settings"] = {"email": "lhb8606@gmail.com", "app_password": "", "label": "업무/MUSV-2", "target_sender": "hblee@dh.co.kr OR 이헌범"}
             elif "target_sender" not in data["gmail_settings"]:
                 data["gmail_settings"]["target_sender"] = "hblee@dh.co.kr OR 이헌범"
@@ -109,6 +108,7 @@ def get_email_body(msg):
             pass
     return ""
 
+# [오류 해결] Gmail 연동 함수 수정: UTF-8 캐릭터셋 명시 및 검색어 포맷 재구성
 def fetch_musv_emails(email_user, app_password, label, target_sender):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -119,10 +119,9 @@ def fetch_musv_emails(email_user, app_password, label, target_sender):
             st.error("메일함을 선택할 수 없습니다. 계정 설정을 확인해 주세요.")
             return []
             
-        # [핵심 변경] OR 조건을 괄호로 묶어 이메일 주소나 이름 중 하나라도 일치하면 가져오도록 수정
-        search_query = f'X-GM-RAW "from:({target_sender}) label:{label}"'
-        
-        status, messages = mail.search(None, search_query.encode('utf-8'))
+        # 구글 고유 검색어(X-GM-RAW)를 사용할 때, 첫 번째 인자로 "utf-8"을 넘겨 한글 파싱 오류 방지
+        search_query = f'from:({target_sender}) label:"{label}"'
+        status, messages = mail.search("utf-8", "X-GM-RAW", search_query)
         
         email_list = []
         if status == "OK" and messages[0]:
@@ -292,8 +291,6 @@ elif menu == "📩 이메일 연동함":
     with st.expander("⚙️ Gmail 연동 설정 (한 번만 입력)"):
         g_email = st.text_input("Gmail 주소", value=g_settings.get("email", ""))
         g_app_pw = st.text_input("앱 비밀번호 (16자리)", value=g_settings.get("app_password", ""), type="password")
-        
-        # 기본 라벨과 발신자를 사진에 맞게 변경 적용
         g_label = st.text_input("가져올 라벨 이름 (예: 업무/MUSV-2)", value=g_settings.get("label", "업무/MUSV-2"))
         g_target = st.text_input("고정 발신자 필터", value=g_settings.get("target_sender", "hblee@dh.co.kr OR 이헌범"))
         
