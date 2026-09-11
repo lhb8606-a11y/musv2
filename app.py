@@ -209,7 +209,7 @@ DEFAULT_SETTINGS["ai"] = {
     "enabled": False,
     "provider": "openai",   # openai / gemini / anthropic
     "api_key": "",
-    "model": "gpt-4o-mini", # gpt-4o-mini / gemini-1.5-flash / claude-3-5-haiku-20241022
+    "model": "gpt-4o-mini", # gpt-4o-mini / gemini-3.5-flash / claude-3-5-haiku-20241022
     "auto_classify_on_email": True,
     "auto_suggest_tags": True,
 }
@@ -247,7 +247,13 @@ def _ai_call_openai(api_key, model, system, user, temperature=0.3, max_tokens=15
 
 
 def _ai_call_gemini(api_key, model, system, user, temperature=0.3, max_tokens=1500):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    # 사용자가 models/ 접두어를 입력했다면 제거
+    model = (model or "").strip()
+    if model.startswith("models/"):
+        model = model[len("models/"):]
+    if not model:
+        model = "gemini-3.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
@@ -256,16 +262,32 @@ def _ai_call_gemini(api_key, model, system, user, temperature=0.3, max_tokens=15
             "maxOutputTokens": max_tokens,
         },
     }
+    # AQ. 프리픽스 신형 키와 AIza 구형 키 모두 x-goog-api-key 헤더 방식으로 통일
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        obj = json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            obj = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="ignore")
+        except Exception:
+            err_body = ""
+        raise RuntimeError(f"Gemini API HTTP {e.code}: {err_body[:500]}")
+    # 응답 파싱
     try:
         return obj["candidates"][0]["content"]["parts"][0]["text"]
     except Exception:
-        return json.dumps(obj)
+        # 안전성 차단 등 특수 케이스
+        if "promptFeedback" in obj:
+            return f"[Gemini blocked] {json.dumps(obj['promptFeedback'], ensure_ascii=False)}"
+        return json.dumps(obj, ensure_ascii=False)[:800]
 
 
 def _ai_call_anthropic(api_key, model, system, user, temperature=0.3, max_tokens=1500):
@@ -304,7 +326,7 @@ def ai_call(settings, system, user, temperature=0.3, max_tokens=1500):
     if provider == "openai":
         return _ai_call_openai(api_key, model or "gpt-4o-mini", system, user, temperature, max_tokens)
     if provider == "gemini":
-        return _ai_call_gemini(api_key, model or "gemini-1.5-flash", system, user, temperature, max_tokens)
+        return _ai_call_gemini(api_key, model or "gemini-3.5-flash", system, user, temperature, max_tokens)
     if provider == "anthropic":
         return _ai_call_anthropic(api_key, model or "claude-3-5-haiku-20241022", system, user, temperature, max_tokens)
     raise RuntimeError(f"알 수 없는 AI provider: {provider}")
@@ -2003,9 +2025,12 @@ elif menu == "⚙️ 관리자 설정":
             }[x],
         )
 
+        # 2026-09 현재 신규 발급 키에서 실제 호출 가능한 모델
         model_defaults = {
             "openai":    ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
-            "gemini":    ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"],
+            "gemini":    ["gemini-3.5-flash", "gemini-3.5-flash-lite",
+                          "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-pro-latest",
+                          "gemini-3.6-flash"],
             "anthropic": ["claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022", "claude-sonnet-4-20250514"],
         }
         cur_model = ai_cfg.get("model", model_defaults[ai_provider][0])
@@ -2027,11 +2052,15 @@ elif menu == "⚙️ 관리자 설정":
         b1, b2 = st.columns(2)
         with b1:
             if st.button("💾 AI 설정 저장", type="primary", use_container_width=True):
+                clean_model = ai_model.strip()
+                # Gemini는 models/ 접두어 자동 제거
+                if ai_provider == "gemini" and clean_model.startswith("models/"):
+                    clean_model = clean_model[len("models/"):]
                 settings["ai"] = {
                     "enabled": ai_enabled,
                     "provider": ai_provider,
                     "api_key": ai_key.strip(),
-                    "model": ai_model.strip(),
+                    "model": clean_model,
                     "auto_classify_on_email": auto_email,
                     "auto_suggest_tags": auto_tags,
                 }
@@ -2069,10 +2098,25 @@ elif menu == "⚙️ 관리자 설정":
         with st.expander("② Google Gemini 키 발급 (무료 티어 있음)", expanded=(ai_provider == "gemini")):
             st.markdown("""
 1. https://aistudio.google.com/app/apikey 접속 (Google 로그인)
-2. **`Create API key`** 클릭 → 신규 프로젝트 or 기존 프로젝트에서 생성
-3. `AIza...` 로 시작하는 키 복사
-4. **무료 티어**: 분당 15회, 일 1,500회 (`gemini-1.5-flash` 기준) — 개인용으로 충분
-5. **모델 추천**: `gemini-1.5-flash` (빠르고 무료), 정확도 필요시 `gemini-2.5-flash`
+2. **`Create API key`** 클릭 → 신규/기존 프로젝트에서 생성
+3. 발급된 키를 복사해서 위 **API 키** 필드에 붙여넣기
+   - 신형 계정: `AQ.` 로 시작 (Authentication Key)
+   - 구형 계정: `AIza...` 로 시작
+   - 이 앱은 **두 형식 모두 자동 지원** (`x-goog-api-key` 헤더 방식)합니다.
+
+**✅ 2026-09 현재 신규 발급 키로 실제 호출되는 모델 (실측)**
+- **`gemini-3.5-flash`** — 무료 티어 안정, 기본값 · **추천**
+- `gemini-3.5-flash-lite` — 더 빠름/저렴
+- `gemini-flash-latest` — 항상 최신 flash 별칭 (가끔 timeout)
+- `gemini-3.6-flash` — 최신, 종종 503 UNAVAILABLE
+
+**⚠️ 404: Not Found 가 나오는 모델 (신규 키로는 막힘 · 넣지 마세요)**
+- `gemini-1.5-flash`, `gemini-1.5-pro`, `gemini-2.0-flash` — 완전 종료
+- `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.5-flash-lite` — 신규 계정 차단, 기존 사용자만 유지
+
+**주의사항**
+- 모델명에 `models/` 접두어를 붙이지 마세요 (저장 시 자동 제거되지만, `gemini-3.5-flash` 처럼만 입력).
+- 429/503이 뜨면 무료 티어 쿼터 초과 또는 순간 과부하 → 잠시 후 재시도.
 """)
 
         with st.expander("③ Anthropic Claude 키 발급", expanded=(ai_provider == "anthropic")):
