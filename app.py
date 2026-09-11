@@ -16,7 +16,7 @@ SETTINGS_FILE = 'settings.json'
 
 DEFAULT_SETTINGS = {
     "MUSV-2": {
-        "activity_types": ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"],
+        "activity_types": ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)", "주간보고"],
         "categories": {
             "1. 개요": ["1-1. 일정", "1-2. 회의"],
             "2. BCC": ["2-1. BCC", "2-2. 사급자재", "2-3. ECS PC", "2-4. 모니터"],
@@ -25,7 +25,7 @@ DEFAULT_SETTINGS = {
             "5. 프로그램": ["5-1. 컨셉 다이어그램", "5-2. ECS PLC", "5-3. ECS PC", "5-4. ECS HMI", "5-5. 임무콘솔", "5-6. DAU & HISTORIAN", "5-7. ETC."]
         },
         "tags": ["DAU", "BCC", "사급자재", "UPS", "ECS PC", "ECS PLC", "ECS 모니터", "DAU PANEL", 
-                 "히스토리안서버", "극동선박설계", "유일조선소", "한화시스템", "한화엔진", "한화오션", "KR선급"],
+                 "히스토리안서버", "극동선박설계", "유일조선소", "한화시스템", "한화엔진", "한화오션", "KR선급", "주간보고"],
         "weekly_reports": {}
     },
     "gmail_settings": {
@@ -49,7 +49,9 @@ def load_settings():
                     if "weekly_reports" not in data[proj]:
                         data[proj]["weekly_reports"] = {}
                     if "activity_types" not in data[proj]:
-                        data[proj]["activity_types"] = ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"]
+                        data[proj]["activity_types"] = ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)", "주간보고"]
+                    elif "주간보고" not in data[proj]["activity_types"]:
+                        data[proj]["activity_types"].append("주간보고")
             return data
     else:
         save_settings(DEFAULT_SETTINGS)
@@ -62,8 +64,9 @@ def save_settings(settings):
 def load_data():
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
-        df.rename(columns={'내용(주제)': '제목', '회의록_및_비고': '내용'}, inplace=True)
-        
+        if '내용(주제)' in df.columns and '회의록_및_비고' in df.columns:
+            df.rename(columns={'내용(주제)': '제목', '회의록_및_비고': '내용'}, inplace=True)
+            
         required_cols = ["프로젝트", "업무유형", "대분류", "중분류", "시작일", "목표일", "실제완료일", "장소", "관련자(참석자/송수신자)", "제목", "내용", "태그", "상태", "드라이브_링크", "연관업무ID"]
         for col in required_cols:
             if col not in df.columns:
@@ -236,7 +239,9 @@ def generate_calendar_html(df, base_date, act_types):
                                 is_active = True
                                 
                     if is_active:
-                        if status == '지연':
+                        if ttype == '주간보고':
+                            bg_color, font_color = '#0050b3', '#ffffff' # 주간보고 전용 짙은 파란색
+                        elif status == '지연':
                             bg_color, font_color = '#f5222d', '#ffffff'
                         else:
                             try:
@@ -283,7 +288,7 @@ with col_proj2:
     menu = st.selectbox("메뉴 이동", ["📊 대시보드 (업무 관리)", "📩 이메일 연동함", "🗂️ 전체 항목 보기 (검색)", "⚙️ 관리자 설정 (분류/백업)"])
 
 proj_act_types = settings[selected_project].get("activity_types", ["일반 업무"])
-if not proj_act_types: proj_act_types = ["일반 업무"]
+if "주간보고" not in proj_act_types: proj_act_types.append("주간보고")
 proj_categories = settings[selected_project]["categories"]
 proj_tags = settings[selected_project]["tags"]
 
@@ -329,46 +334,39 @@ if menu == "📊 대시보드 (업무 관리)":
 
     project_df = df[df['프로젝트'] == selected_project].copy()
     
-    tab1, tab2 = st.tabs(["🗓️ 월간 캘린더 (실전 6주)", "📋 집중 업무 표 (진행중/지연)"])
-
-    with tab1:
-        st.subheader("업무 일정 캘린더")
-        col_cal1, col_cal2 = st.columns([3, 7])
-        with col_cal1:
-            st.date_input("조회 기준일", key='cal_base_date')
-            st.button("🎯 오늘로 복귀", on_click=set_today)
-        
-        st.info("💡 캘린더 안의 업무를 **클릭**하시면 화면 하단에 상세 보기 및 수정 창이 나타납니다.")
-        calendar_html = generate_calendar_html(project_df, st.session_state.cal_base_date, proj_act_types)
-        st.markdown(calendar_html, unsafe_allow_html=True)
-        
-        # ==========================================
-        # [신규 추가] 자동 주간보고 생성 기능
-        # ==========================================
-        st.markdown("---")
-        st.subheader("📊 주간 업무 요약 보고서")
-        
+    # [핵심] 첫 화면 수직 레이아웃 (달력 -> 주간보고 폼 -> 업무표 -> 상세 폼)
+    st.subheader("🗓️ 업무 일정 캘린더 (실전 6주)")
+    col_cal1, col_cal2 = st.columns([3, 7])
+    with col_cal1:
+        st.date_input("조회 기준일", key='cal_base_date')
+        st.button("🎯 오늘로 복귀", on_click=set_today)
+    
+    st.info("💡 캘린더 안의 업무를 **클릭**하시면 최하단에 상세 보기 및 수정 창이 나타납니다.")
+    calendar_html = generate_calendar_html(project_df, st.session_state.cal_base_date, proj_act_types)
+    st.markdown(calendar_html, unsafe_allow_html=True)
+    
+    # 주간보고 자동 생성 및 저장 영역
+    st.markdown("---")
+    with st.expander("📊 주간 업무 요약 보고서 자동 생성 및 저장", expanded=False):
         curr_date = st.session_state.cal_base_date
         year, week, _ = curr_date.isocalendar()
-        week_key = f"{year}-W{week:02d}"
+        week_start = curr_date - timedelta(days=curr_date.weekday())
+        sunday_date = week_start + timedelta(days=6)
+        report_title = f"{year}년 {week}주차 주간보고"
         
         col_rep1, col_rep2 = st.columns([8, 2])
         with col_rep1:
-            st.markdown(f"**조회 기준 주차:** {year}년 {week}주차")
+            st.markdown(f"**기준 주차:** {year}년 {week}주차 ({week_start.strftime('%Y-%m-%d')} ~ {sunday_date.strftime('%Y-%m-%d')})")
         with col_rep2:
             if st.button("✨ 이번 주 업무 자동 요약", use_container_width=True):
-                week_start = curr_date - timedelta(days=curr_date.weekday())
-                week_end = week_start + timedelta(days=6)
-                
                 week_start_ts = pd.to_datetime(week_start)
-                week_end_ts = pd.to_datetime(week_end)
+                week_end_ts = pd.to_datetime(sunday_date)
                 
-                # 이번 주와 기간이 겹치는 일정들 필터링
-                mask = (project_df['시작일'] <= week_end_ts) & (project_df['목표일'].isna() | (project_df['목표일'] >= week_start_ts))
+                mask = (project_df['시작일'] <= week_end_ts) & (project_df['목표일'].isna() | (project_df['목표일'] >= week_start_ts)) & (project_df['업무유형'] != '주간보고')
                 week_tasks = project_df[mask]
                 
                 summary = f"[{selected_project} 주간 업무 보고 - {year}년 {week}주차]\n"
-                summary += f"기간: {week_start.strftime('%Y-%m-%d')} ~ {week_end.strftime('%Y-%m-%d')}\n\n"
+                summary += f"기간: {week_start.strftime('%Y-%m-%d')} ~ {sunday_date.strftime('%Y-%m-%d')}\n\n"
                 
                 completed = week_tasks[week_tasks['상태'] == '완료']
                 ongoing = week_tasks[week_tasks['상태'].isin(['진행중', '미정'])]
@@ -388,41 +386,60 @@ if menu == "📊 대시보드 (업무 관리)":
                     for _, task in delayed.iterrows():
                         summary += f"- [{task['업무유형']}] {task['제목']}\n"
                         
-                st.session_state[f'report_{selected_project}_{week_key}'] = summary
+                st.session_state[f'temp_report_{selected_project}'] = summary
                 st.rerun()
         
-        report_text = st.session_state.get(f'report_{selected_project}_{week_key}', settings[selected_project].get("weekly_reports", {}).get(week_key, ""))
-        edited_report = st.text_area("보고서 내용 (자유롭게 추가/수정 가능)", value=report_text, height=250, key=f"text_{week_key}")
+        # 기존 저장된 보고서 내용 가져오기 (DataFrame 검색)
+        existing_report_row = df[(df['프로젝트'] == selected_project) & (df['제목'] == report_title) & (df['업무유형'] == '주간보고')]
+        default_text = existing_report_row['내용'].iloc[0] if not existing_report_row.empty else ""
+        report_text = st.session_state.get(f'temp_report_{selected_project}', default_text)
         
-        if st.button("💾 주간보고 저장"):
-            if "weekly_reports" not in settings[selected_project]:
-                settings[selected_project]["weekly_reports"] = {}
-            settings[selected_project]["weekly_reports"][week_key] = edited_report
-            save_settings(settings)
-            st.success(f"{year}년 {week}주차 주간보고가 성공적으로 저장되었습니다.")
+        edited_report = st.text_area("보고서 내용 (자유롭게 추가/수정 후 아래 저장 버튼 클릭)", value=report_text, height=250)
+        
+        if st.button("💾 주간보고 달력에 저장", type="primary"):
+            if not existing_report_row.empty:
+                idx_to_update = existing_report_row.index[0]
+                df.at[idx_to_update, '내용'] = edited_report
+                df.at[idx_to_update, '시작일'] = pd.to_datetime(sunday_date)
+                df.at[idx_to_update, '목표일'] = pd.to_datetime(sunday_date)
+            else:
+                new_row = {
+                    "프로젝트": selected_project, "업무유형": "주간보고",
+                    "대분류": list(proj_categories.keys())[0] if proj_categories else "없음", 
+                    "중분류": "없음",
+                    "시작일": pd.to_datetime(sunday_date), "목표일": pd.to_datetime(sunday_date), "실제완료일": pd.NaT,
+                    "장소": "-", "관련자(참석자/송수신자)": "-", "제목": report_title, 
+                    "내용": edited_report, "태그": "주간보고", "상태": "완료", 
+                    "드라이브_링크": "", "연관업무ID": ""
+                }
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            save_data(df)
+            st.success(f"{report_title} 데이터가 달력의 해당 주 일요일에 생성되었습니다!")
+            st.rerun()
 
-    with tab2:
-        st.subheader("집중 업무 표 (완료 항목 제외)")
-        selected_filter_tags = st.multiselect("조회할 태그 필터", proj_tags)
+    st.markdown("---")
+    st.subheader("📋 집중 업무 표 (완료 항목 제외)")
+    selected_filter_tags = st.multiselect("조회할 태그 필터", proj_tags)
+    
+    # 완료된 항목 제외 필터링
+    display_df = project_df[project_df['상태'].isin(['진행중', '미정', '지연'])].copy()
+    
+    if selected_filter_tags:
+        pattern = '|'.join(selected_filter_tags)
+        display_df = display_df[display_df['태그'].str.contains(pattern, na=False)]
         
-        display_df = project_df[project_df['상태'] != '완료'].copy()
-        
-        if selected_filter_tags:
-            pattern = '|'.join(selected_filter_tags)
-            display_df = display_df[display_df['태그'].str.contains(pattern, na=False)]
-            
-        col_order = ['상태', '업무유형', '시작일', '목표일', '제목', '내용', '태그']
-        
-        event = st.dataframe(
-            display_df[col_order],
-            on_select="rerun", selection_mode="single-row", use_container_width=True, hide_index=True
-        )
-        
-        if len(event.selection.rows) > 0:
-            st.session_state.selected_task_idx = display_df.index[event.selection.rows[0]]
+    col_order = ['상태', '업무유형', '시작일', '목표일', '제목', '내용', '태그']
+    
+    event = st.dataframe(
+        display_df[col_order],
+        on_select="rerun", selection_mode="single-row", use_container_width=True, hide_index=True
+    )
+    
+    if len(event.selection.rows) > 0:
+        st.session_state.selected_task_idx = display_df.index[event.selection.rows[0]]
 
     # ==========================================
-    # 상세 보기 및 전체 수정 폼 (캘린더 & 표 공용 연동)
+    # 상세 보기 및 전체 수정 폼 (화면 최하단 고정)
     # ==========================================
     if st.session_state.selected_task_idx is not None:
         actual_idx = st.session_state.selected_task_idx
@@ -431,7 +448,7 @@ if menu == "📊 대시보드 (업무 관리)":
             
             st.markdown("---")
             col_t1, col_t2 = st.columns([9, 1])
-            col_t1.subheader("📝 선택한 업무 상세 보기 및 전체 수정")
+            col_t1.subheader(f"📝 상세 보기 및 수정: {task_data['제목']}")
             if col_t2.button("✖️ 닫기"):
                 st.session_state.selected_task_idx = None
                 st.rerun()
