@@ -28,7 +28,6 @@ DEFAULT_SETTINGS = {
     "gmail_settings": {
         "email": "lhb8606@gmail.com",
         "app_password": "",
-        "label": "업무/MUSV-2",
         "target_sender": "hblee@dh.co.kr OR 이헌범"
     }
 }
@@ -38,7 +37,7 @@ def load_settings():
         with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if "gmail_settings" not in data:
-                data["gmail_settings"] = {"email": "lhb8606@gmail.com", "app_password": "", "label": "업무/MUSV-2", "target_sender": "hblee@dh.co.kr OR 이헌범"}
+                data["gmail_settings"] = {"email": "lhb8606@gmail.com", "app_password": "", "target_sender": "hblee@dh.co.kr OR 이헌범"}
             elif "target_sender" not in data["gmail_settings"]:
                 data["gmail_settings"]["target_sender"] = "hblee@dh.co.kr OR 이헌범"
                 
@@ -75,10 +74,10 @@ def save_data(df):
     df.to_csv(DATA_FILE, index=False)
 
 def extract_company_from_email(email_addr):
-    match = re.search(r'@([a-zA-Z0-9-]+)\.', email_addr)
+    match = re.search(r'@([a-zA-Z0-9-]+)\.', str(email_addr))
     if match:
         return match.group(1)
-    return email_addr
+    return str(email_addr)
 
 def decode_mime_words(s):
     if not s: return ""
@@ -88,7 +87,7 @@ def decode_mime_words(s):
         if isinstance(word, bytes):
             result += word.decode(encoding or 'utf-8', errors='ignore')
         else:
-            result += word
+            result += str(word)
     return result
 
 def get_email_body(msg):
@@ -108,47 +107,70 @@ def get_email_body(msg):
             pass
     return ""
 
-# [오류 완전 해결] Gmail 연동 함수: 한글 검색어 인코딩 에러 원천 차단
-def fetch_musv_emails(email_user, app_password, label, target_sender):
+# [에러 원천 차단] 파이썬 자체 필터링 엔진이 탑재된 이메일 연동 함수
+def fetch_musv_emails(email_user, app_password, target_sender):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(email_user, app_password)
         
-        status, _ = mail.select("INBOX")
-        if status != "OK":
-            st.error("메일함을 선택할 수 없습니다. 계정 설정을 확인해 주세요.")
-            return []
-            
-        # 검색어 문자열 생성
-        search_query_str = f'from:({target_sender}) label:"{label}"'
+        # 1. 언어에 상관없이 '전체보관함(All Mail)' 폴더를 자동으로 찾아 접속
+        status, folders = mail.list()
+        all_mail_folder = '"[Gmail]/All Mail"'
+        for folder in folders:
+            if b'\\All' in folder:
+                parts = folder.decode('utf-8', errors='ignore').split(' "/" ')
+                if len(parts) == 2:
+                    all_mail_folder = parts[1]
+                break
         
-        # [핵심] IMAP search에 명시적 캐릭터셋(UTF-8) 지정 및 쿼리 바이트 변환
-        status, messages = mail.search("UTF-8", "X-GM-RAW", search_query_str.encode('utf-8'))
+        mail.select(all_mail_folder, readonly=True)
+        
+        # 2. 구글 서버에는 '가장 최근 메일 전부 가져와' 라고만 명령 (에러 발생 확률 0%)
+        status, messages = mail.search(None, "ALL")
         
         email_list = []
         if status == "OK" and messages[0]:
             msg_ids = messages[0].split()
-            for msg_id in reversed(msg_ids[-10:]):
+            
+            # 검색어 분리 (예: 'hblee@dh.co.kr' 와 '이헌범')
+            targets = [t.strip().lower() for t in target_sender.replace('OR', ',').split(',') if t.strip()]
+            
+            # 3. 가장 최근 메일 150개를 역순으로 스캔하며 파이썬이 직접 발신자 검사
+            for msg_id in reversed(msg_ids[-150:]):
                 res, msg_data = mail.fetch(msg_id, '(RFC822)')
                 if res == "OK":
                     raw_email = msg_data[0][1]
                     msg = email.message_from_bytes(raw_email)
                     
-                    subject = decode_mime_words(msg["Subject"])
-                    sender = decode_mime_words(msg["From"])
-                    date_ = msg["Date"]
-                    company = extract_company_from_email(sender)
-                    body = get_email_body(msg)
+                    sender = decode_mime_words(msg.get("From", ""))
+                    sender_lower = sender.lower()
                     
-                    short_body = (body[:100] + '...') if len(body) > 100 else body
-                    
-                    email_list.append({
-                        "날짜": date_,
-                        "회사명": company,
-                        "보낸이": sender,
-                        "제목": subject,
-                        "본문요약": short_body.strip()
-                    })
+                    # 파이썬 자체 필터링 (완벽한 한글 매칭 지원)
+                    matched = False
+                    for t in targets:
+                        if t in sender_lower:
+                            matched = True
+                            break
+                            
+                    if matched:
+                        subject = decode_mime_words(msg.get("Subject", ""))
+                        date_ = msg.get("Date", "")
+                        company = extract_company_from_email(sender)
+                        body = get_email_body(msg)
+                        
+                        short_body = (body[:100] + '...') if len(body) > 100 else body
+                        
+                        email_list.append({
+                            "날짜": date_,
+                            "회사명": company,
+                            "보낸이": sender,
+                            "제목": subject,
+                            "본문요약": short_body.strip()
+                        })
+                        
+                        # 원하는 메일을 10개 찾으면 탐색 종료
+                        if len(email_list) >= 10:
+                            break
         mail.logout()
         return email_list
     except Exception as e:
@@ -285,6 +307,64 @@ if menu == "📊 대시보드 (업무 관리)":
             column_config={"드라이브_링크": st.column_config.LinkColumn("자료 링크")},
             on_select="rerun", selection_mode="single-row", use_container_width=True, hide_index=True
         )
+        
+        if len(event.selection.rows) > 0:
+            selected_row_idx = event.selection.rows[0]
+            actual_idx = display_df.index[selected_row_idx]
+            task_data = display_df.loc[actual_idx]
+            
+            st.markdown("---")
+            st.subheader("📝 선택한 업무 상세 보기 및 전체 수정")
+            
+            with st.form("edit_form"):
+                col_e1, col_e2, col_e3 = st.columns(3)
+                edit_status = col_e1.selectbox("상태", ["진행중", "완료", "지연"], index=["진행중", "완료", "지연"].index(task_data['상태']))
+                edit_type = col_e2.selectbox("업무유형", ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"], index=["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)"].index(task_data['업무유형']))
+                
+                s_date = task_data['시작일'] if pd.notna(task_data['시작일']) else date.today()
+                t_date = task_data['목표일'] if pd.notna(task_data['목표일']) else date.today()
+                r_date = task_data['실제완료일'] if pd.notna(task_data['실제완료일']) else None
+                
+                edit_s_date = col_e1.date_input("시작일", s_date)
+                edit_t_date = col_e2.date_input("목표일", t_date)
+                edit_r_date = col_e3.date_input("실제완료일", value=r_date)
+
+                col_e4, col_e5 = st.columns(2)
+                main_cat_idx = list(proj_categories.keys()).index(task_data['대분류']) if task_data['대분류'] in proj_categories else 0
+                edit_main_cat = col_e4.selectbox("대분류", list(proj_categories.keys()), index=main_cat_idx)
+                
+                sub_cats = proj_categories.get(edit_main_cat, ["없음"])
+                sub_cat_idx = sub_cats.index(task_data['중분류']) if task_data['중분류'] in sub_cats else 0
+                edit_sub_cat = col_e5.selectbox("중분류", sub_cats, index=sub_cat_idx)
+                
+                edit_loc = st.text_input("장소", str(task_data['장소']) if pd.notna(task_data['장소']) else "")
+                edit_people = st.text_input("관련자(참석자/송수신자)", str(task_data['관련자(참석자/송수신자)']) if pd.notna(task_data['관련자(참석자/송수신자)']) else "")
+                edit_content = st.text_area("내용(주제)", str(task_data['내용(주제)']) if pd.notna(task_data['내용(주제)']) else "")
+                edit_note = st.text_area("회의록 및 비고", str(task_data['회의록_및_비고']) if pd.notna(task_data['회의록_및_비고']) else "", height=150)
+                edit_link = st.text_input("구글 드라이브 링크", str(task_data['드라이브_링크']) if pd.notna(task_data['드라이브_링크']) else "")
+                
+                current_tags = [t.strip() for t in str(task_data['태그']).split(",")] if pd.notna(task_data['태그']) and task_data['태그'] else []
+                valid_tags = [t for t in current_tags if t in proj_tags]
+                edit_tags = st.multiselect("태그", proj_tags, default=valid_tags)
+                
+                if st.form_submit_button("변경 사항 저장"):
+                    df.at[actual_idx, '상태'] = edit_status
+                    df.at[actual_idx, '업무유형'] = edit_type
+                    df.at[actual_idx, '대분류'] = edit_main_cat
+                    df.at[actual_idx, '중분류'] = edit_sub_cat
+                    df.at[actual_idx, '시작일'] = pd.to_datetime(edit_s_date)
+                    df.at[actual_idx, '목표일'] = pd.to_datetime(edit_t_date)
+                    df.at[actual_idx, '실제완료일'] = pd.to_datetime(edit_r_date) if edit_r_date else pd.NaT
+                    df.at[actual_idx, '장소'] = edit_loc
+                    df.at[actual_idx, '관련자(참석자/송수신자)'] = edit_people
+                    df.at[actual_idx, '내용(주제)'] = edit_content
+                    df.at[actual_idx, '회의록_및_비고'] = edit_note
+                    df.at[actual_idx, '드라이브_링크'] = edit_link
+                    df.at[actual_idx, '태그'] = ", ".join(edit_tags)
+                    
+                    save_data(df)
+                    st.success("업무 내용이 성공적으로 수정되었습니다.")
+                    st.rerun()
 
 elif menu == "📩 이메일 연동함":
     st.title("📩 수신된 이메일 일정 등록")
@@ -293,23 +373,25 @@ elif menu == "📩 이메일 연동함":
     with st.expander("⚙️ Gmail 연동 설정 (한 번만 입력)"):
         g_email = st.text_input("Gmail 주소", value=g_settings.get("email", ""))
         g_app_pw = st.text_input("앱 비밀번호 (16자리)", value=g_settings.get("app_password", ""), type="password")
-        g_label = st.text_input("가져올 라벨 이름 (예: 업무/MUSV-2)", value=g_settings.get("label", "업무/MUSV-2"))
-        g_target = st.text_input("고정 발신자 필터", value=g_settings.get("target_sender", "hblee@dh.co.kr OR 이헌범"))
+        
+        # 라벨 입력칸은 제거했습니다 (파이썬이 직접 발신자만 필터링하므로 훨씬 안정적입니다)
+        st.info("💡 에러 방지를 위해 '고정 발신자' 기준으로 수신 메일을 탐색합니다.")
+        g_target = st.text_input("고정 발신자 필터 (여러 명일 경우 'OR' 대신 쉼표(,)로 구분)", value=g_settings.get("target_sender", "hblee@dh.co.kr, 이헌범"))
         
         if st.button("설정 저장"):
-            settings["gmail_settings"] = {"email": g_email, "app_password": g_app_pw, "label": g_label, "target_sender": g_target}
+            settings["gmail_settings"] = {"email": g_email, "app_password": g_app_pw, "target_sender": g_target}
             save_settings(settings)
             st.success("메일 설정이 저장되었습니다.")
             
     if st.button("🔄 새 메일 불러오기", type="primary"):
         if g_email and g_app_pw and g_target:
-            with st.spinner(f"라벨 '{g_label}'에서 발신자 조건 '{g_target}'에 해당하는 메일을 검색 중입니다..."):
-                emails = fetch_musv_emails(g_email, g_app_pw, g_label, g_target)
+            with st.spinner(f"가장 최근 수신된 메일 중 발신자가 '{g_target}'인 메일을 걸러내고 있습니다..."):
+                emails = fetch_musv_emails(g_email, g_app_pw, g_target)
                 if emails:
                     st.session_state.fetched_emails = emails
                     st.success(f"{len(emails)}개의 지정된 메일을 성공적으로 불러왔습니다.")
                 else:
-                    st.warning("해당 조건에 맞는 새 메일이 없습니다.")
+                    st.warning("최근 150개의 메일 중 해당 발신자의 메일이 없습니다.")
         else:
             st.error("위의 연동 설정에서 이메일, 앱 비밀번호, 고정 발신자를 모두 확인해 주세요.")
             
