@@ -28,8 +28,8 @@ DEFAULT_SETTINGS = {
     "gmail_settings": {
         "email": "lhb8606@gmail.com",
         "app_password": "",
-        "label": "업무-musv2",
-        "target_sender": "hblee@dh.co.kr"
+        "label": "업무/MUSV-2",
+        "target_sender": "hblee@dh.co.kr OR 이헌범"
     }
 }
 
@@ -38,9 +38,10 @@ def load_settings():
         with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if "gmail_settings" not in data:
-                data["gmail_settings"] = {"email": "lhb8606@gmail.com", "app_password": "", "label": "업무-musv2", "target_sender": "hblee@dh.co.kr"}
+                # 사진을 참고하여 기본 라벨을 '업무/MUSV-2', 발신자를 'hblee@dh.co.kr OR 이헌범'으로 업데이트
+                data["gmail_settings"] = {"email": "lhb8606@gmail.com", "app_password": "", "label": "업무/MUSV-2", "target_sender": "hblee@dh.co.kr OR 이헌범"}
             elif "target_sender" not in data["gmail_settings"]:
-                data["gmail_settings"]["target_sender"] = "hblee@dh.co.kr"
+                data["gmail_settings"]["target_sender"] = "hblee@dh.co.kr OR 이헌범"
                 
             for proj in data:
                 if proj != "gmail_settings" and "weekly_reports" not in data[proj]:
@@ -108,21 +109,20 @@ def get_email_body(msg):
             pass
     return ""
 
-# [오류 해결] Gmail 연동 함수 수정
 def fetch_musv_emails(email_user, app_password, label, target_sender):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(email_user, app_password)
         
-        # 언어 설정과 무관하게 작동하는 범용 INBOX 선택
         status, _ = mail.select("INBOX")
         if status != "OK":
             st.error("메일함을 선택할 수 없습니다. 계정 설정을 확인해 주세요.")
             return []
             
-        # 발신자 및 라벨 동시 필터링
-        search_query = f'X-GM-RAW "from:{target_sender} label:{label}"'
-        status, messages = mail.search(None, search_query)
+        # [핵심 변경] OR 조건을 괄호로 묶어 이메일 주소나 이름 중 하나라도 일치하면 가져오도록 수정
+        search_query = f'X-GM-RAW "from:({target_sender}) label:{label}"'
+        
+        status, messages = mail.search(None, search_query.encode('utf-8'))
         
         email_list = []
         if status == "OK" and messages[0]:
@@ -292,9 +292,10 @@ elif menu == "📩 이메일 연동함":
     with st.expander("⚙️ Gmail 연동 설정 (한 번만 입력)"):
         g_email = st.text_input("Gmail 주소", value=g_settings.get("email", ""))
         g_app_pw = st.text_input("앱 비밀번호 (16자리)", value=g_settings.get("app_password", ""), type="password")
-        g_label = st.text_input("가져올 라벨 이름", value=g_settings.get("label", "업무-musv2"))
         
-        g_target = st.text_input("고정 발신자 이메일", value=g_settings.get("target_sender", "hblee@dh.co.kr"))
+        # 기본 라벨과 발신자를 사진에 맞게 변경 적용
+        g_label = st.text_input("가져올 라벨 이름 (예: 업무/MUSV-2)", value=g_settings.get("label", "업무/MUSV-2"))
+        g_target = st.text_input("고정 발신자 필터", value=g_settings.get("target_sender", "hblee@dh.co.kr OR 이헌범"))
         
         if st.button("설정 저장"):
             settings["gmail_settings"] = {"email": g_email, "app_password": g_app_pw, "label": g_label, "target_sender": g_target}
@@ -303,13 +304,13 @@ elif menu == "📩 이메일 연동함":
             
     if st.button("🔄 새 메일 불러오기", type="primary"):
         if g_email and g_app_pw and g_target:
-            with st.spinner(f"'{g_target}' 발신 및 '{g_label}' 라벨 메일을 검색 중입니다..."):
+            with st.spinner(f"라벨 '{g_label}'에서 발신자 조건 '{g_target}'에 해당하는 메일을 검색 중입니다..."):
                 emails = fetch_musv_emails(g_email, g_app_pw, g_label, g_target)
                 if emails:
                     st.session_state.fetched_emails = emails
                     st.success(f"{len(emails)}개의 지정된 메일을 성공적으로 불러왔습니다.")
                 else:
-                    st.warning("해당 조건(발신자+라벨)에 맞는 새 메일이 없습니다.")
+                    st.warning("해당 조건에 맞는 새 메일이 없습니다.")
         else:
             st.error("위의 연동 설정에서 이메일, 앱 비밀번호, 고정 발신자를 모두 확인해 주세요.")
             
