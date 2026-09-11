@@ -24,6 +24,8 @@ from email.header import decode_header
 import re
 import io
 import uuid
+import urllib.request
+import urllib.error
 
 # =====================================================
 # 0. 페이지 설정 & 전역 CSS
@@ -202,6 +204,233 @@ TASK_COLS = ["ID", "프로젝트", "업무유형", "대분류", "중분류", "�
              "시작일", "목표일", "실제완료일", "장소", "관련자(참석자/송수신자)",
              "제목", "내용", "태그", "상태", "드라이브_링크", "연관업무ID", "생성일시", "수정일시"]
 
+# AI 기본 설정
+DEFAULT_SETTINGS["ai"] = {
+    "enabled": False,
+    "provider": "openai",   # openai / gemini / anthropic
+    "api_key": "",
+    "model": "gpt-4o-mini", # gpt-4o-mini / gemini-1.5-flash / claude-3-5-haiku-20241022
+    "auto_classify_on_email": True,
+    "auto_suggest_tags": True,
+}
+
+
+# =====================================================
+# 1-A. AI 헬퍼 (OpenAI / Gemini / Anthropic 3사 지원)
+# =====================================================
+def ai_available(settings):
+    ai = settings.get("ai", {})
+    return bool(ai.get("enabled") and ai.get("api_key") and ai.get("provider"))
+
+
+def _ai_call_openai(api_key, model, system, user, temperature=0.3, max_tokens=1500):
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        obj = json.loads(r.read().decode("utf-8"))
+    return obj["choices"][0]["message"]["content"]
+
+
+def _ai_call_gemini(api_key, model, system, user, temperature=0.3, max_tokens=1500):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    body = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        },
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        obj = json.loads(r.read().decode("utf-8"))
+    try:
+        return obj["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return json.dumps(obj)
+
+
+def _ai_call_anthropic(api_key, model, system, user, temperature=0.3, max_tokens=1500):
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps({
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }).encode("utf-8"),
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        obj = json.loads(r.read().decode("utf-8"))
+    try:
+        return obj["content"][0]["text"]
+    except Exception:
+        return json.dumps(obj)
+
+
+def ai_call(settings, system, user, temperature=0.3, max_tokens=1500):
+    """provider별 라우팅. 실패 시 예외 raise."""
+    ai = settings.get("ai", {})
+    provider = ai.get("provider", "openai")
+    api_key  = ai.get("api_key", "")
+    model    = ai.get("model", "")
+    if not api_key:
+        raise RuntimeError("AI API 키가 설정되지 않았습니다.")
+    if provider == "openai":
+        return _ai_call_openai(api_key, model or "gpt-4o-mini", system, user, temperature, max_tokens)
+    if provider == "gemini":
+        return _ai_call_gemini(api_key, model or "gemini-1.5-flash", system, user, temperature, max_tokens)
+    if provider == "anthropic":
+        return _ai_call_anthropic(api_key, model or "claude-3-5-haiku-20241022", system, user, temperature, max_tokens)
+    raise RuntimeError(f"알 수 없는 AI provider: {provider}")
+
+
+def ai_json(settings, system, user, temperature=0.2, max_tokens=1500):
+    """AI 응답에서 JSON 블록만 추출."""
+    raw = ai_call(settings, system, user, temperature, max_tokens)
+    # ```json ... ``` 또는 순수 JSON 대응
+    m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", raw, re.DOTALL)
+    if m:
+        raw = m.group(1)
+    else:
+        m2 = re.search(r"(\{.*\}|\[.*\])", raw, re.DOTALL)
+        if m2: raw = m2.group(1)
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"_raw": raw, "_error": "JSON 파싱 실패"}
+
+
+def ai_classify_task(settings, title, body, activity_types, categories, tags):
+    """제목/본문 → 업무유형/대분류/중분류/태그/우선순위/추천제목 자동 분류."""
+    cats_desc = json.dumps(categories, ensure_ascii=False)
+    tags_desc = json.dumps(tags, ensure_ascii=False)
+    acts_desc = json.dumps(activity_types, ensure_ascii=False)
+    system = (
+        "당신은 조선/해양 방산 프로젝트(MUSV, 무인수상정)의 업무 분류 도우미입니다. "
+        "동화엔텍 전기제어설계팀의 협력사(한화시스템, 한화엔진, 한화오션, 유일조선소, 극동선박설계, KR선급, MS산전 등) "
+        "관련 업무를 정확히 분류하세요. 반드시 유효한 JSON만 응답하세요."
+    )
+    user = f"""다음 업무를 분류해주세요.
+
+[제목]
+{title}
+
+[내용]
+{body[:3000]}
+
+[허용된 업무유형 목록]
+{acts_desc}
+
+[허용된 대분류 → 중분류 매핑]
+{cats_desc}
+
+[허용된 태그 목록]
+{tags_desc}
+
+다음 형식의 JSON으로만 응답 (설명 금지):
+{{
+  "업무유형": "위 목록 중 하나",
+  "대분류": "위 매핑의 대분류 중 하나",
+  "중분류": "선택한 대분류 하위의 중분류 중 하나",
+  "태그": ["관련 태그 1~5개, 위 목록에서만"],
+  "우선순위": "🟢 낮음 | 🔵 보통 | 🟠 높음 | 🔴 긴급 중 하나",
+  "제안제목": "핵심을 담은 50자 이내 요약 제목",
+  "요약": "업무 내용을 3~5줄로 정리"
+}}"""
+    return ai_json(settings, system, user)
+
+
+def ai_write_weekly_report(settings, project_name, week_label, tasks_summary):
+    """AI가 주간보고서 초안 자동 작성."""
+    system = (
+        "당신은 조선/해양 방산 PM의 주간보고 어시스턴트입니다. "
+        "건조하고 명확한 한국어로, 관리자가 5분 안에 읽을 수 있는 주간보고를 작성합니다. "
+        "숫자와 사실 위주로, 불필요한 수식어와 감사 인사는 넣지 마세요."
+    )
+    user = f"""{project_name} 프로젝트의 {week_label} 주간보고를 작성해주세요.
+
+[이번 주 업무 데이터]
+{tasks_summary}
+
+다음 구조로 마크다운 형식 응답:
+
+## 📌 이번 주 핵심 성과
+(3~5개 bullet)
+
+## ✅ 완료 업무
+(항목별로 [업무유형] 제목 — 결과/산출물 한 줄)
+
+## 🏃 진행 및 예정 업무
+(항목별로 [업무유형] 제목 — 다음 액션 아이템)
+
+## ⚠️ 지연/이슈
+(있으면 원인과 대응방안까지)
+
+## 📅 다음 주 계획
+(3~5개 bullet, 우선순위 높은 순)
+
+## 🤝 협력사 관련 특이사항
+(한화시스템/한화엔진/한화오션/유일조선소/KR선급 등 관련 이슈)"""
+    return ai_call(settings, system, user, temperature=0.4, max_tokens=2500)
+
+
+def ai_summarize_email(settings, subject, sender, body):
+    """이메일 → 3줄 요약 + 액션아이템."""
+    system = "이메일을 간결하게 요약하는 한국어 업무 도우미입니다. 반드시 JSON으로만 응답하세요."
+    user = f"""[제목] {subject}
+[보낸이] {sender}
+[본문]
+{body[:3000]}
+
+응답 JSON:
+{{
+  "요약": "핵심 3줄 이내",
+  "액션아이템": ["해야할 일 목록, 없으면 빈 배열"],
+  "마감일자": "YYYY-MM-DD 또는 빈 문자열",
+  "긴급도": "🟢 낮음 | 🔵 보통 | 🟠 높음 | 🔴 긴급"
+}}"""
+    return ai_json(settings, system, user)
+
+
+def ai_polish_task_note(settings, raw_text):
+    """지저분한 메모를 업무일지 스타일로 정리."""
+    system = "지저분한 회의 메모/업무 메모를 깔끔한 업무일지 형태로 다듬는 한국어 어시스턴트입니다."
+    user = f"""아래 원문 메모를 업무일지에 그대로 붙여넣을 수 있게 정리해주세요.
+- 불필요한 감탄사·중복 제거
+- 결정사항 / 액션아이템 / 참고사항으로 구조화
+- 원본 사실 왜곡 금지
+
+[원문]
+{raw_text}
+"""
+    return ai_call(settings, system, user, temperature=0.3, max_tokens=1500)
+
 
 # =====================================================
 # 2. 데이터 IO 계층
@@ -223,9 +452,12 @@ def load_settings():
     for k in ("email", "app_password", "target_sender"):
         data["gmail_settings"].setdefault(k, DEFAULT_SETTINGS["gmail_settings"][k])
     data.setdefault("ui", {"theme": "라이트", "week_start": "월요일"})
+    data.setdefault("ai", json.loads(json.dumps(DEFAULT_SETTINGS["ai"])))
+    for k, v in DEFAULT_SETTINGS["ai"].items():
+        data["ai"].setdefault(k, v)
 
     for proj, cfg in list(data.items()):
-        if proj in ("gmail_settings", "ui"): continue
+        if proj in ("gmail_settings", "ui", "ai"): continue
         cfg.setdefault("activity_types", ["회의 진행", "메일/자료 송수신", "일반 업무 (설계/검토 등)", "주간보고"])
         if "주간보고" not in cfg["activity_types"]:
             cfg["activity_types"].append("주간보고")
@@ -597,7 +829,7 @@ st.markdown(
 
 head_c1, head_c2, head_c3, head_c4 = st.columns([2.2, 2.2, 2.2, 3.4])
 with head_c1:
-    project_list = [p for p in settings.keys() if p not in ("gmail_settings", "ui")]
+    project_list = [p for p in settings.keys() if p not in ("gmail_settings", "ui", "ai")]
     if not project_list:
         settings["MUSV-2"] = json.loads(json.dumps(DEFAULT_SETTINGS["MUSV-2"]))
         save_settings(settings)
@@ -666,55 +898,108 @@ if global_search:
 # =====================================================
 with st.sidebar:
     st.markdown("### ➕ 빠른 업무 등록")
-    with st.form("quick_add", clear_on_submit=True):
-        q_type = st.selectbox("업무유형", proj_act_types)
-        q_main = st.selectbox("대분류", list(proj_categories.keys()) or ["없음"])
-        sub_opts = proj_categories.get(q_main, ["없음"]) if proj_categories else ["없음"]
-        q_sub  = st.selectbox("중분류", sub_opts or ["없음"])
-        q_prio = st.selectbox("우선순위", PRIORITY_LIST, index=1)
+    st.caption("대분류를 바꾸면 중분류가 즉시 반영됩니다.")
 
-        col_qd1, col_qd2 = st.columns(2)
-        q_start = col_qd1.date_input("시작일", date.today())
-        q_target = col_qd2.date_input("목표일", date.today())
-        q_no_target = st.checkbox("🕒 목표일 미정 (지속 업무)")
+    q_type = st.selectbox("업무유형", proj_act_types, key="qadd_type")
 
-        q_title = st.text_input("제목 *", placeholder="필수")
-        q_content = st.text_area("내용", height=80)
-        q_people = st.text_input("참석자/관련자", placeholder="쉼표로 구분")
-        q_place  = st.text_input("장소")
-        q_tags   = st.multiselect("태그", proj_tags)
-        q_link   = st.text_input("자료 링크")
+    cats_keys = list(proj_categories.keys()) or ["없음"]
+    q_main = st.selectbox("대분류", cats_keys, key="qadd_main")
+    # 대분류 변경 시 중분류 자동 초기화
+    if st.session_state.get("qadd_prev_main") != q_main:
+        st.session_state["qadd_prev_main"] = q_main
+        if "qadd_sub" in st.session_state:
+            del st.session_state["qadd_sub"]
+    sub_opts = proj_categories.get(q_main, ["없음"]) or ["없음"]
+    q_sub = st.selectbox("중분류", sub_opts, key="qadd_sub")
 
-        submit = st.form_submit_button("✅ 등록", use_container_width=True, type="primary")
-        if submit:
-            if not q_title.strip():
-                st.error("제목은 필수입니다.")
-            else:
-                now = pd.Timestamp.now()
-                new_row = {
-                    "ID": new_id(),
-                    "프로젝트": selected_project,
-                    "업무유형": q_type,
-                    "대분류": q_main,
-                    "중분류": q_sub,
-                    "우선순위": q_prio,
-                    "시작일": pd.to_datetime(q_start),
-                    "목표일": pd.NaT if q_no_target else pd.to_datetime(q_target),
-                    "실제완료일": pd.NaT,
-                    "장소": q_place,
-                    "관련자(참석자/송수신자)": q_people,
-                    "제목": q_title.strip(),
-                    "내용": q_content,
-                    "태그": ", ".join(q_tags),
-                    "상태": "미정" if q_no_target else "진행중",
-                    "드라이브_링크": q_link,
-                    "연관업무ID": "",
-                    "생성일시": now, "수정일시": now,
-                }
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                save_data(df)
-                st.success(f"등록 완료: {q_title}")
+    q_prio = st.selectbox("우선순위", PRIORITY_LIST, index=1, key="qadd_prio")
+
+    col_qd1, col_qd2 = st.columns(2)
+    q_start = col_qd1.date_input("시작일", date.today(), key="qadd_start")
+    q_target = col_qd2.date_input("목표일", date.today(), key="qadd_target")
+    q_no_target = st.checkbox("🕒 목표일 미정 (지속 업무)", key="qadd_no_target")
+
+    q_title = st.text_input("제목 *", placeholder="필수", key="qadd_title")
+    q_content = st.text_area("내용", height=80, key="qadd_content")
+
+    # 🤖 AI 자동 분류 버튼 (제목/내용 기반)
+    ai_on = ai_available(settings)
+    ac1, ac2 = st.columns([1, 1])
+    with ac1:
+        ai_autoclassify = st.button(
+            "🤖 AI 자동 분류",
+            disabled=(not ai_on) or (not q_title.strip() and not q_content.strip()),
+            help=("AI가 제목/내용을 보고 업무유형·분류·태그·우선순위를 자동 세팅합니다."
+                  if ai_on else "관리자 설정 → AI 탭에서 API 키를 등록하세요."),
+            use_container_width=True,
+            key="qadd_ai_btn",
+        )
+    if ai_autoclassify:
+        try:
+            with st.spinner("AI 분류 중..."):
+                res = ai_classify_task(settings, q_title, q_content, proj_act_types, proj_categories, proj_tags)
+            if isinstance(res, dict) and "업무유형" in res:
+                # 세션 상태 덮어쓰기
+                if res.get("업무유형") in proj_act_types:
+                    st.session_state["qadd_type"] = res["업무유형"]
+                if res.get("대분류") in proj_categories:
+                    st.session_state["qadd_main"] = res["대분류"]
+                    st.session_state["qadd_prev_main"] = res["대분류"]
+                    sub_cand = res.get("중분류")
+                    if sub_cand in proj_categories.get(res["대분류"], []):
+                        st.session_state["qadd_sub"] = sub_cand
+                if res.get("우선순위") in PRIORITY_LIST:
+                    st.session_state["qadd_prio"] = res["우선순위"]
+                if res.get("제안제목"):
+                    st.session_state["qadd_title"] = res["제안제목"]
+                st.session_state["qadd_ai_tags"] = [t for t in (res.get("태그") or []) if t in proj_tags]
+                st.success("AI 분류 반영됨. 필요시 수정 후 등록하세요.")
                 st.rerun()
+            else:
+                st.warning(f"AI 응답 파싱 실패: {res}")
+        except Exception as e:
+            st.error(f"AI 호출 실패: {e}")
+
+    default_ai_tags = st.session_state.get("qadd_ai_tags", [])
+    q_people = st.text_input("참석자/관련자", placeholder="쉼표로 구분", key="qadd_people")
+    q_place  = st.text_input("장소", key="qadd_place")
+    q_tags   = st.multiselect("태그", proj_tags, default=default_ai_tags, key="qadd_tags")
+    q_link   = st.text_input("자료 링크", key="qadd_link")
+
+    if st.button("✅ 등록", use_container_width=True, type="primary", key="qadd_submit"):
+        if not q_title.strip():
+            st.error("제목은 필수입니다.")
+        else:
+            now = pd.Timestamp.now()
+            new_row = {
+                "ID": new_id(),
+                "프로젝트": selected_project,
+                "업무유형": q_type,
+                "대분류": q_main,
+                "중분류": q_sub,
+                "우선순위": q_prio,
+                "시작일": pd.to_datetime(q_start),
+                "목표일": pd.NaT if q_no_target else pd.to_datetime(q_target),
+                "실제완료일": pd.NaT,
+                "장소": q_place,
+                "관련자(참석자/송수신자)": q_people,
+                "제목": q_title.strip(),
+                "내용": q_content,
+                "태그": ", ".join(q_tags),
+                "상태": "미정" if q_no_target else "진행중",
+                "드라이브_링크": q_link,
+                "연관업무ID": "",
+                "생성일시": now, "수정일시": now,
+            }
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            save_data(df)
+            # 폼 입력값 초기화
+            for k in ("qadd_title", "qadd_content", "qadd_people", "qadd_place",
+                      "qadd_link", "qadd_tags", "qadd_ai_tags"):
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.success(f"등록 완료: {q_title}")
+            st.rerun()
 
     st.markdown("---")
     st.caption("💡 캘린더 항목을 **클릭**하면 하단에 상세 편집 창이 열립니다.")
@@ -793,11 +1078,25 @@ def render_detail_editor(df, task_id):
 
         c1, c2 = st.columns(2)
         cats = list(proj_categories.keys()) or ["없음"]
-        main_idx = cats.index(task["대분류"]) if task["대분류"] in cats else 0
-        e_main = c1.selectbox("대분류", cats, index=main_idx, key=f"mc_{task_id}")
+        main_key = f"mc_{task_id}"
+        sub_key  = f"sc_{task_id}"
+        # 초기 진입 시 원본 값으로 세션에 셋업
+        if main_key not in st.session_state:
+            st.session_state[main_key] = task["대분류"] if task["대분류"] in cats else cats[0]
+        # 대분류가 바뀌면 중분류 값을 삭제하여 새 리스트의 첫 항목이 잡히도록
+        prev_main_key = f"mc_prev_{task_id}"
+        if st.session_state.get(prev_main_key) != st.session_state[main_key]:
+            if sub_key in st.session_state:
+                del st.session_state[sub_key]
+            st.session_state[prev_main_key] = st.session_state[main_key]
+
+        e_main = c1.selectbox("대분류", cats, key=main_key)
         subs = proj_categories.get(e_main, ["없음"]) or ["없음"]
-        sub_idx = subs.index(task["중분류"]) if task["중분류"] in subs else 0
-        e_sub = c2.selectbox("중분류", subs, index=sub_idx, key=f"sc_{task_id}")
+        if sub_key not in st.session_state:
+            st.session_state[sub_key] = task["중분류"] if task["중분류"] in subs else subs[0]
+        elif st.session_state[sub_key] not in subs:
+            st.session_state[sub_key] = subs[0]
+        e_sub = c2.selectbox("중분류", subs, key=sub_key)
 
         e_title = st.text_input("제목", str(task["제목"]) if pd.notna(task["제목"]) else "", key=f"ti_{task_id}")
         e_content = st.text_area("내용", str(task["내용"]) if pd.notna(task["내용"]) else "", height=180, key=f"co_{task_id}")
@@ -814,7 +1113,7 @@ def render_detail_editor(df, task_id):
         e_tags = st.multiselect("태그", tag_options, default=[t for t in cur_tags if t in tag_options], key=f"tg_{task_id}")
         e_link = st.text_input("자료 링크", str(task["드라이브_링크"]) if pd.notna(task["드라이브_링크"]) else "", key=f"lk_{task_id}")
 
-        save_c1, save_c2 = st.columns([1, 5])
+        save_c1, save_c2, save_c3 = st.columns([1, 1, 4])
         with save_c1:
             if st.button("💾 저장", key=f"sv_{task_id}", type="primary", use_container_width=True):
                 df.at[idx, "상태"] = e_status
@@ -833,9 +1132,34 @@ def render_detail_editor(df, task_id):
                 df.at[idx, "드라이브_링크"] = e_link
                 df.at[idx, "수정일시"] = pd.Timestamp.now()
                 save_data(df)
+                # 편집 관련 session_state 정리 (다음 진입 시 최신 값으로 초기화)
+                for k in list(st.session_state.keys()):
+                    if k.endswith(f"_{task_id}"):
+                        del st.session_state[k]
                 st.success("저장 완료")
                 st.rerun()
         with save_c2:
+            # 🤖 AI 내용 정리 버튼
+            ai_on = ai_available(settings)
+            if st.button("🤖 AI 내용 다듬기", key=f"ai_polish_{task_id}",
+                         disabled=(not ai_on) or (not e_content.strip()),
+                         help=("지저분한 메모를 업무일지 형태로 정리합니다."
+                               if ai_on else "관리자 → AI 탭에서 API 키를 등록하세요."),
+                         use_container_width=True):
+                try:
+                    with st.spinner("AI 정리 중..."):
+                        polished = ai_polish_task_note(settings, e_content)
+                    df.at[idx, "내용"] = polished
+                    df.at[idx, "수정일시"] = pd.Timestamp.now()
+                    save_data(df)
+                    # 내용 필드 세션값 제거하여 새 값 로드
+                    if f"co_{task_id}" in st.session_state:
+                        del st.session_state[f"co_{task_id}"]
+                    st.success("내용을 다듬어 저장했습니다.")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"AI 실패: {ex}")
+        with save_c3:
             st.caption("💡 완료 상태로 저장하면 캘린더에서 취소선/흐린 색으로 표시됩니다.")
 
     return df
@@ -946,7 +1270,7 @@ if menu == "📊 대시보드":
         sunday_date = we
         report_title = f"[{year}-W{week_num:02d}] 주간보고"
 
-        rc1, rc2, rc3 = st.columns([5, 3, 2])
+        rc1, rc2, rc3, rc4 = st.columns([4, 3, 2, 2])
         with rc1:
             st.markdown(f"**기준 주차:** {year}년 {week_num}주 ({ws.strftime('%Y-%m-%d')} ~ {we.strftime('%Y-%m-%d')})")
         with rc2:
@@ -956,7 +1280,47 @@ if menu == "📊 대시보드":
                 key="report_scope"
             )
         with rc3:
-            auto_btn = st.button("✨ 자동 요약", use_container_width=True, type="primary")
+            auto_btn = st.button("✨ 규칙 요약", use_container_width=True)
+        with rc4:
+            ai_on_rep = ai_available(settings)
+            ai_report_btn = st.button(
+                "🤖 AI 보고서 작성",
+                use_container_width=True, type="primary",
+                disabled=(not ai_on_rep),
+                help=("AI가 문장형 주간보고를 작성합니다." if ai_on_rep else "관리자 → AI 탭에서 API 키를 등록하세요."),
+            )
+
+        if ai_report_btn:
+            mask = (
+                (project_df["시작일"] <= we) &
+                (project_df["목표일"].isna() | (project_df["목표일"] >= ws)) &
+                (project_df["업무유형"] != "주간보고")
+            )
+            wk = project_df[mask]
+            lines = []
+            for _, t in wk.iterrows():
+                start = pd.Timestamp(t["시작일"]).strftime("%m/%d") if pd.notna(t["시작일"]) else "-"
+                end   = pd.Timestamp(t["목표일"]).strftime("%m/%d") if pd.notna(t["목표일"]) else "미정"
+                ppl   = t["관련자(참석자/송수신자)"] if pd.notna(t["관련자(참석자/송수신자)"]) else ""
+                tags  = t["태그"] if pd.notna(t["태그"]) else ""
+                content = (str(t["내용"])[:200] if pd.notna(t["내용"]) else "")
+                lines.append(
+                    f"- [{t['상태']}][{t['업무유형']}][{t['대분류']}/{t['중분류']}] "
+                    f"{t['제목']} ({start}~{end}, 관련: {ppl}, 태그: {tags}) :: {content}"
+                )
+            tasks_summary = "\n".join(lines) if lines else "(이번 주 업무 없음)"
+            try:
+                with st.spinner("AI가 주간보고를 작성 중..."):
+                    ai_report = ai_write_weekly_report(
+                        settings, selected_project,
+                        f"{year}년 {week_num}주차 ({ws.strftime('%m/%d')}~{we.strftime('%m/%d')})",
+                        tasks_summary
+                    )
+                st.session_state[f"temp_report_{selected_project}_{week_num}"] = ai_report
+                st.success("AI 주간보고서 초안이 생성되었습니다.")
+                st.rerun()
+            except Exception as ex:
+                st.error(f"AI 실패: {ex}")
 
         if auto_btn:
             mask = (
@@ -1190,6 +1554,28 @@ elif menu == "📩 이메일 연동함":
                 emails = fetch_musv_emails(g["email"], g["app_password"], g["target_sender"], limit=15, scan=200)
             if emails:
                 st.session_state.fetched_emails = emails
+                # 이전 AI 결과 초기화
+                for k in list(st.session_state.keys()):
+                    if k.startswith("mail_ai_") or k.startswith("mcat_") or k.startswith("msub_") \
+                            or k.startswith("mtype_") or k.startswith("mprio_") or k.startswith("mtags_") \
+                            or k.startswith("mdate_") or k.startswith("mstat_"):
+                        del st.session_state[k]
+                # 옵션: 자동 AI 분류
+                if ai_available(settings) and settings.get("ai", {}).get("auto_classify_on_email", True):
+                    prog = st.progress(0.0, text="AI 자동 분류 중...")
+                    for i, m in enumerate(emails):
+                        try:
+                            cls = ai_classify_task(
+                                settings, m["제목"], (m.get("본문") or m["본문요약"] or ""),
+                                proj_act_types, proj_categories, proj_tags
+                            )
+                            if isinstance(cls, dict) and "업무유형" in cls:
+                                st.session_state[f"mail_ai_{i}"] = cls
+                                st.session_state[f"mail_ai_done_{i}"] = True
+                        except Exception:
+                            pass
+                        prog.progress((i+1)/len(emails), text=f"AI 자동 분류 중... ({i+1}/{len(emails)})")
+                    prog.empty()
                 st.success(f"{len(emails)}통을 불러왔습니다.")
             else:
                 st.warning("조건에 맞는 메일이 없거나 로그인에 실패했습니다.")
@@ -1198,8 +1584,34 @@ elif menu == "📩 이메일 연동함":
 
     emails = st.session_state.get("fetched_emails", [])
     if emails:
+        ai_on = ai_available(settings)
         st.markdown(f"#### 📥 수신된 메일 ({len(emails)}통)")
+        if ai_on:
+            batch_c1, batch_c2 = st.columns([1, 5])
+            with batch_c1:
+                if st.button("🤖 전체 AI 자동 분석", use_container_width=True, type="primary"):
+                    prog = st.progress(0.0)
+                    for i, m in enumerate(emails):
+                        if st.session_state.get(f"mail_ai_done_{i}"):
+                            prog.progress((i+1)/len(emails)); continue
+                        try:
+                            cls = ai_classify_task(
+                                settings, m["제목"], (m.get("본문") or m["본문요약"] or ""),
+                                proj_act_types, proj_categories, proj_tags
+                            )
+                            if isinstance(cls, dict) and "업무유형" in cls:
+                                st.session_state[f"mail_ai_{i}"] = cls
+                                st.session_state[f"mail_ai_done_{i}"] = True
+                        except Exception:
+                            pass
+                        prog.progress((i+1)/len(emails))
+                    st.success("일괄 AI 분석 완료. 각 카드 값이 자동 채워졌습니다.")
+                    st.rerun()
+            with batch_c2:
+                st.caption("💡 버튼을 누르면 모든 메일의 업무유형·분류·태그·우선순위·마감일을 AI가 한번에 세팅합니다. 확인 후 [등록]만 눌러주세요.")
+
         for idx, mail in enumerate(emails):
+            ai_res = st.session_state.get(f"mail_ai_{idx}", {})
             with st.container(border=True):
                 mc1, mc2 = st.columns([3, 2])
                 with mc1:
@@ -1207,46 +1619,119 @@ elif menu == "📩 이메일 연동함":
                     st.caption(f"보낸이: {mail['보낸이']} · {mail['날짜']}")
                     with st.expander("본문 미리보기"):
                         st.write(mail["본문요약"] or "(본문 없음)")
-                with mc2:
-                    with st.form(f"mail_reg_{idx}", clear_on_submit=True):
-                        m_type = st.selectbox("업무유형", proj_act_types,
-                                              index=proj_act_types.index("메일/자료 송수신")
-                                              if "메일/자료 송수신" in proj_act_types else 0,
-                                              key=f"mtype_{idx}")
-                        m_stat = st.selectbox("상태", ["진행중", "미정", "완료"], key=f"mstat_{idx}")
-                        m_date = st.date_input("마감 일정", date.today() + timedelta(days=7), key=f"mdate_{idx}")
-                        m_prio = st.selectbox("우선순위", PRIORITY_LIST, index=1, key=f"mprio_{idx}")
-                        m_tags = st.multiselect("태그", proj_tags, default=[], key=f"mtags_{idx}")
-                        m_cats = list(proj_categories.keys()) or ["없음"]
-                        m_cat  = st.selectbox("대분류", m_cats, key=f"mcat_{idx}")
-                        m_subs = proj_categories.get(m_cat, ["없음"]) or ["없음"]
-                        m_sub  = st.selectbox("중분류", m_subs, key=f"msub_{idx}")
+                    if ai_res:
+                        with st.expander("🤖 AI 요약", expanded=True):
+                            st.write(ai_res.get("요약", "-"))
+                    ai_single = st.button(
+                        "🤖 이 메일만 AI 분석", key=f"mail_ai_btn_{idx}",
+                        disabled=(not ai_on),
+                        help=("이 메일 한 건에 대해 자동분류·요약을 실행"
+                              if ai_on else "관리자 → AI 탭에서 API 키를 등록하세요."),
+                    )
+                    if ai_single:
+                        try:
+                            with st.spinner("AI 분석 중..."):
+                                cls = ai_classify_task(
+                                    settings, mail["제목"], (mail.get("본문") or mail["본문요약"] or ""),
+                                    proj_act_types, proj_categories, proj_tags
+                                )
+                            if isinstance(cls, dict) and "업무유형" in cls:
+                                st.session_state[f"mail_ai_{idx}"] = cls
+                                st.session_state[f"mail_ai_done_{idx}"] = True
+                                st.rerun()
+                            else:
+                                st.warning(f"AI 응답 이상: {cls}")
+                        except Exception as ex:
+                            st.error(f"AI 실패: {ex}")
 
-                        if st.form_submit_button("📌 캘린더에 등록", use_container_width=True):
-                            now = pd.Timestamp.now()
-                            row = {
-                                "ID": new_id(),
-                                "프로젝트": selected_project, "업무유형": m_type,
-                                "대분류": m_cat, "중분류": m_sub, "우선순위": m_prio,
-                                "시작일": pd.to_datetime(date.today()),
-                                "목표일": pd.NaT if m_stat == "미정" else pd.to_datetime(m_date),
-                                "실제완료일": now if m_stat == "완료" else pd.NaT,
-                                "장소": "-",
-                                "관련자(참석자/송수신자)": mail["회사명"],
-                                "제목": mail["제목"][:150],
-                                "내용": (mail.get("본문") or mail["본문요약"])[:2000],
-                                "태그": ", ".join(m_tags),
-                                "상태": m_stat,
-                                "드라이브_링크": "",
-                                "연관업무ID": "",
-                                "생성일시": now, "수정일시": now,
-                            }
-                            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-                            save_data(df)
-                            st.success("등록 완료")
-                            st.rerun()
+                with mc2:
+                    # AI 추천값을 기본값으로
+                    ai_type = ai_res.get("업무유형") if ai_res.get("업무유형") in proj_act_types else None
+                    default_type = ai_type or ("메일/자료 송수신" if "메일/자료 송수신" in proj_act_types else proj_act_types[0])
+                    m_type = st.selectbox("업무유형", proj_act_types,
+                                          index=proj_act_types.index(default_type),
+                                          key=f"mtype_{idx}")
+
+                    default_stat = "진행중"
+                    m_stat = st.selectbox("상태", ["진행중", "미정", "완료"],
+                                          index=["진행중", "미정", "완료"].index(default_stat),
+                                          key=f"mstat_{idx}")
+
+                    # AI 마감일 파싱
+                    default_due = date.today() + timedelta(days=7)
+                    ai_due = ai_res.get("마감일자") or ""
+                    if ai_due:
+                        try:
+                            default_due = pd.to_datetime(ai_due).date()
+                        except Exception:
+                            pass
+                    m_date = st.date_input("마감 일정", default_due, key=f"mdate_{idx}")
+
+                    ai_prio = ai_res.get("우선순위") if ai_res.get("우선순위") in PRIORITY_LIST else None
+                    m_prio = st.selectbox("우선순위", PRIORITY_LIST,
+                                          index=PRIORITY_LIST.index(ai_prio) if ai_prio else 1,
+                                          key=f"mprio_{idx}")
+
+                    ai_tags = [t for t in (ai_res.get("태그") or []) if t in proj_tags]
+                    m_tags = st.multiselect("태그", proj_tags, default=ai_tags, key=f"mtags_{idx}")
+
+                    m_cats = list(proj_categories.keys()) or ["없음"]
+                    # AI 대분류 세션 초기값
+                    mcat_key = f"mcat_{idx}"
+                    if mcat_key not in st.session_state:
+                        if ai_res.get("대분류") in m_cats:
+                            st.session_state[mcat_key] = ai_res["대분류"]
+                        else:
+                            st.session_state[mcat_key] = m_cats[0]
+                    # 대분류 변경 시 중분류 초기화
+                    prev_key = f"mcat_prev_{idx}"
+                    if st.session_state.get(prev_key) != st.session_state[mcat_key]:
+                        if f"msub_{idx}" in st.session_state:
+                            del st.session_state[f"msub_{idx}"]
+                        st.session_state[prev_key] = st.session_state[mcat_key]
+                    m_cat  = st.selectbox("대분류", m_cats, key=mcat_key)
+                    m_subs = proj_categories.get(m_cat, ["없음"]) or ["없음"]
+                    msub_key = f"msub_{idx}"
+                    if msub_key not in st.session_state:
+                        ai_sub = ai_res.get("중분류")
+                        st.session_state[msub_key] = ai_sub if ai_sub in m_subs else m_subs[0]
+                    elif st.session_state[msub_key] not in m_subs:
+                        st.session_state[msub_key] = m_subs[0]
+                    m_sub  = st.selectbox("중분류", m_subs, key=msub_key)
+
+                    if st.button("📌 캘린더에 등록", key=f"mreg_{idx}", use_container_width=True, type="primary"):
+                        now = pd.Timestamp.now()
+                        # AI 요약이 있으면 제목/내용에 반영
+                        ai_title = ai_res.get("제안제목") or mail["제목"][:150]
+                        body_prefix = ""
+                        if ai_res.get("요약"):
+                            body_prefix = f"📌 AI 요약\n{ai_res['요약']}\n\n"
+                            if ai_res.get("액션아이템"):
+                                body_prefix += "✅ 액션아이템\n" + "\n".join(f"- {a}" for a in ai_res['액션아이템']) + "\n\n"
+                            body_prefix += "───────\n📩 원문\n"
+                        row = {
+                            "ID": new_id(),
+                            "프로젝트": selected_project, "업무유형": m_type,
+                            "대분류": m_cat, "중분류": m_sub, "우선순위": m_prio,
+                            "시작일": pd.to_datetime(date.today()),
+                            "목표일": pd.NaT if m_stat == "미정" else pd.to_datetime(m_date),
+                            "실제완료일": now if m_stat == "완료" else pd.NaT,
+                            "장소": "-",
+                            "관련자(참석자/송수신자)": mail["회사명"],
+                            "제목": ai_title[:150],
+                            "내용": (body_prefix + (mail.get("본문") or mail["본문요약"]))[:3000],
+                            "태그": ", ".join(m_tags),
+                            "상태": m_stat,
+                            "드라이브_링크": "",
+                            "연관업무ID": "",
+                            "생성일시": now, "수정일시": now,
+                        }
+                        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+                        save_data(df)
+                        # 이 메일은 처리됨 표시
+                        st.success("등록 완료")
     else:
-        st.info("‘새 메일 불러오기’를 눌러 시작하세요.")
+        st.info("'새 메일 불러오기'를 눌러 시작하세요.")
 
 
 # =====================================================
@@ -1387,15 +1872,15 @@ elif menu == "📈 통계":
 elif menu == "⚙️ 관리자 설정":
     st.markdown("### ⚙️ 관리자 설정")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📁 프로젝트", "🏷️ 분류·태그·업무유형", "📧 Gmail", "🎨 UI/테마", "💾 백업·복원"
+    tab1, tab2, tab3, tab_ai, tab4, tab5 = st.tabs([
+        "📁 프로젝트", "🏷️ 분류·태그·업무유형", "📧 Gmail", "🤖 AI (자동화)", "🎨 UI/테마", "💾 백업·복원"
     ])
 
     # ---------- 프로젝트 관리 ----------
     with tab1:
         st.markdown("#### 프로젝트 목록")
         for p in list(settings.keys()):
-            if p in ("gmail_settings", "ui"): continue
+            if p in ("gmail_settings", "ui", "ai"): continue
             pc1, pc2, pc3 = st.columns([5, 2, 2])
             pc1.write(f"**📁 {p}**  · 태그 {len(settings[p].get('tags', []))}개 · 분류 {len(settings[p].get('categories', {}))}개")
             new_name = pc2.text_input("이름 변경", value=p, key=f"rn_{p}", label_visibility="collapsed")
@@ -1497,6 +1982,126 @@ elif menu == "⚙️ 관리자 설정":
 1. [Google 계정 → 보안](https://myaccount.google.com/security)에서 **2단계 인증**을 켭니다.
 2. [앱 비밀번호](https://myaccount.google.com/apppasswords) 페이지에서 발급받습니다.
 3. 발급된 16자리를 이곳에 붙여넣으세요 (공백 무시).
+""")
+
+    # ---------- AI 자동화 ----------
+    with tab_ai:
+        ai_cfg = settings.get("ai", {})
+        st.markdown("#### 🤖 AI 자동화 설정")
+        st.caption("API 키만 넣으면 자동분류·요약·주간보고 작성이 즉시 활성화됩니다.")
+
+        ai_enabled = st.toggle("AI 기능 활성화", value=bool(ai_cfg.get("enabled")))
+        ai_provider = st.radio(
+            "AI 공급자",
+            ["openai", "gemini", "anthropic"],
+            index=["openai", "gemini", "anthropic"].index(ai_cfg.get("provider", "openai")),
+            horizontal=True,
+            format_func=lambda x: {
+                "openai": "OpenAI (ChatGPT)",
+                "gemini": "Google Gemini",
+                "anthropic": "Anthropic Claude",
+            }[x],
+        )
+
+        model_defaults = {
+            "openai":    ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
+            "gemini":    ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"],
+            "anthropic": ["claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022", "claude-sonnet-4-20250514"],
+        }
+        cur_model = ai_cfg.get("model", model_defaults[ai_provider][0])
+        model_opts = model_defaults[ai_provider]
+        if cur_model not in model_opts:
+            model_opts = [cur_model] + model_opts
+        ai_model = st.selectbox("모델", model_opts, index=model_opts.index(cur_model) if cur_model in model_opts else 0)
+        ai_model = st.text_input("모델명 (직접 입력 가능)", value=ai_model)
+
+        ai_key = st.text_input("API 키", value=ai_cfg.get("api_key", ""), type="password")
+
+        st.markdown("##### 자동 실행 옵션")
+        opt_c1, opt_c2 = st.columns(2)
+        auto_email = opt_c1.checkbox("메일 불러올 때 자동으로 분류/요약 실행",
+                                     value=bool(ai_cfg.get("auto_classify_on_email", True)))
+        auto_tags  = opt_c2.checkbox("빠른 등록 시 AI 태그 자동 추천",
+                                     value=bool(ai_cfg.get("auto_suggest_tags", True)))
+
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("💾 AI 설정 저장", type="primary", use_container_width=True):
+                settings["ai"] = {
+                    "enabled": ai_enabled,
+                    "provider": ai_provider,
+                    "api_key": ai_key.strip(),
+                    "model": ai_model.strip(),
+                    "auto_classify_on_email": auto_email,
+                    "auto_suggest_tags": auto_tags,
+                }
+                save_settings(settings)
+                st.success("AI 설정 저장 완료")
+                st.rerun()
+        with b2:
+            if st.button("🧪 연결 테스트", use_container_width=True,
+                         disabled=not ai_key.strip()):
+                # 임시 설정으로 호출
+                tmp = {"ai": {
+                    "enabled": True, "provider": ai_provider,
+                    "api_key": ai_key.strip(), "model": ai_model.strip(),
+                }}
+                try:
+                    with st.spinner("호출 중..."):
+                        resp = ai_call(tmp, "You are a test bot.", "한 줄로 '안녕하세요' 라고만 답하세요.", max_tokens=50)
+                    st.success(f"✅ 응답: {resp[:120]}")
+                except Exception as ex:
+                    st.error(f"❌ 실패: {ex}")
+
+        st.markdown("---")
+        st.markdown("### 🔑 API 키 발급 안내")
+
+        with st.expander("① OpenAI (ChatGPT / GPT-4o) 키 발급", expanded=(ai_provider == "openai")):
+            st.markdown("""
+1. https://platform.openai.com/api-keys 접속 (로그인 필요)
+2. **`+ Create new secret key`** 클릭 → 이름 입력 → 생성
+3. `sk-...` 로 시작하는 키를 복사해 이곳에 붙여넣기
+4. 결제수단 등록: https://platform.openai.com/settings/organization/billing/overview
+   - 소액(5$) 선불 충전 가능
+   - **모델 추천**: `gpt-4o-mini` (분류/요약에 충분, 매우 저렴 · 100만 토큰당 $0.15)
+""")
+
+        with st.expander("② Google Gemini 키 발급 (무료 티어 있음)", expanded=(ai_provider == "gemini")):
+            st.markdown("""
+1. https://aistudio.google.com/app/apikey 접속 (Google 로그인)
+2. **`Create API key`** 클릭 → 신규 프로젝트 or 기존 프로젝트에서 생성
+3. `AIza...` 로 시작하는 키 복사
+4. **무료 티어**: 분당 15회, 일 1,500회 (`gemini-1.5-flash` 기준) — 개인용으로 충분
+5. **모델 추천**: `gemini-1.5-flash` (빠르고 무료), 정확도 필요시 `gemini-2.5-flash`
+""")
+
+        with st.expander("③ Anthropic Claude 키 발급", expanded=(ai_provider == "anthropic")):
+            st.markdown("""
+1. https://console.anthropic.com/settings/keys 접속
+2. **`+ Create Key`** 클릭 → 이름 입력 → 생성
+3. `sk-ant-...` 로 시작하는 키 복사
+4. 결제수단 등록: https://console.anthropic.com/settings/billing (최소 $5 선불)
+5. **모델 추천**: `claude-3-5-haiku-20241022` (경제적), 품질 우선 시 `claude-3-5-sonnet-20241022`
+""")
+
+        st.markdown("### 🎯 AI가 실제로 하는 일 (현재 구현됨)")
+        st.markdown("""
+| 기능 | 위치 | 동작 |
+|---|---|---|
+| **자동 분류** | 사이드바 빠른등록 → `🤖 AI 자동 분류` | 제목/내용을 분석해 업무유형·대분류·중분류·태그·우선순위·개선된 제목까지 자동 세팅 |
+| **메일 일괄 분석** | 이메일 연동함 → `🤖 전체 AI 자동 분석` | 불러온 모든 메일에 분류·요약·마감일·긴급도를 한번에 매기고, 확인 후 [등록]만 누르면 됩니다 |
+| **메일 단건 분석** | 이메일 카드 → `🤖 이 메일만 AI 분석` | 한 건씩 처리 |
+| **AI 주간보고 작성** | 대시보드 주간보고 → `🤖 AI 보고서 작성` | 이번 주 업무 데이터를 바탕으로 문장형 보고서 초안 작성 (성과/완료/진행/이슈/다음주계획/협력사 이슈) |
+| **업무 내용 다듬기** | 상세 편집 → `🤖 AI 내용 다듬기` | 지저분한 메모를 결정사항/액션아이템/참고사항 구조로 정리 |
+""")
+
+        st.markdown("### 💰 예상 비용 (실측 기준)")
+        st.markdown("""
+- **하루 20건 등록 + 메일 10건 분류 + 주간보고 1회** 기준:
+  - OpenAI `gpt-4o-mini`: **월 $0.5~1** (매우 저렴)
+  - Gemini `1.5-flash`: **무료** (일 1,500회 이내)
+  - Anthropic `Claude 3.5 Haiku`: **월 $1~2**
+- 처음에는 **Gemini 무료 티어**로 시작해보시길 추천합니다.
 """)
 
     # ---------- UI/테마 ----------
