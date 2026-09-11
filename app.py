@@ -108,7 +108,7 @@ def get_email_body(msg):
             pass
     return ""
 
-# [오류 해결] Gmail 연동 함수 수정: UTF-8 캐릭터셋 명시 및 검색어 포맷 재구성
+# [오류 완전 해결] Gmail 연동 함수: 한글 검색어 인코딩 에러 원천 차단
 def fetch_musv_emails(email_user, app_password, label, target_sender):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -119,9 +119,11 @@ def fetch_musv_emails(email_user, app_password, label, target_sender):
             st.error("메일함을 선택할 수 없습니다. 계정 설정을 확인해 주세요.")
             return []
             
-        # 구글 고유 검색어(X-GM-RAW)를 사용할 때, 첫 번째 인자로 "utf-8"을 넘겨 한글 파싱 오류 방지
-        search_query = f'from:({target_sender}) label:"{label}"'
-        status, messages = mail.search("utf-8", "X-GM-RAW", search_query)
+        # 검색어 문자열 생성
+        search_query_str = f'from:({target_sender}) label:"{label}"'
+        
+        # [핵심] IMAP search에 명시적 캐릭터셋(UTF-8) 지정 및 쿼리 바이트 변환
+        status, messages = mail.search("UTF-8", "X-GM-RAW", search_query_str.encode('utf-8'))
         
         email_list = []
         if status == "OK" and messages[0]:
