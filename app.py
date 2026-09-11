@@ -44,7 +44,6 @@ def load_settings():
             elif "target_sender" not in data["gmail_settings"]:
                 data["gmail_settings"]["target_sender"] = "hblee@dh.co.kr OR 이헌범"
                 
-            # 기존 프로젝트 데이터에 누락된 설정(주간보고, 업무유형) 자동 보완
             for proj in data:
                 if proj != "gmail_settings":
                     if "weekly_reports" not in data[proj]:
@@ -80,9 +79,6 @@ def load_data():
 def save_data(df):
     df.to_csv(DATA_FILE, index=False)
 
-# ==========================================
-# 2. 이메일 연동 관련 함수
-# ==========================================
 def extract_company_from_email(email_addr):
     match = re.search(r'@([a-zA-Z0-9-]+)\.', str(email_addr))
     if match:
@@ -173,9 +169,6 @@ def fetch_musv_emails(email_user, app_password, target_sender):
         st.error(f"메일 연동 실패: {e}")
         return []
 
-# ==========================================
-# 3. 달력 렌더링 함수
-# ==========================================
 if 'cal_base_date' not in st.session_state:
     st.session_state.cal_base_date = date.today()
 
@@ -195,13 +188,12 @@ def generate_calendar_html(df, base_date, act_types):
     curr_date = start_date
     today = pd.Timestamp(date.today())
     
-    # [핵심] 업무 유형 추가/변경 대응을 위한 유연한 색상 팔레트 자동 매핑
     color_palettes = [
-        (('#b5e0f5', '#333'), ('#1890ff', '#fff')), # 파랑 계열 (진행중, 완료)
-        (('#d9f7be', '#333'), ('#52c41a', '#fff')), # 초록 계열
-        (('#efdbff', '#333'), ('#722ed1', '#fff')), # 자주 계열
-        (('#ffe58f', '#333'), ('#faad14', '#fff')), # 주황 계열
-        (('#ffd8bf', '#333'), ('#fa541c', '#fff')), # 적갈색 계열
+        (('#b5e0f5', '#333'), ('#1890ff', '#fff')), 
+        (('#d9f7be', '#333'), ('#52c41a', '#fff')), 
+        (('#efdbff', '#333'), ('#722ed1', '#fff')), 
+        (('#ffe58f', '#333'), ('#faad14', '#fff')), 
+        (('#ffd8bf', '#333'), ('#fa541c', '#fff')), 
     ]
     
     for _ in range(6):
@@ -259,9 +251,6 @@ def generate_calendar_html(df, base_date, act_types):
     html += "</table>"
     return html
 
-# ==========================================
-# 4. 앱 메인 화면 구성
-# ==========================================
 st.set_page_config(page_title="통합 업무 대시보드", layout="wide")
 settings = load_settings()
 df = load_data()
@@ -279,44 +268,50 @@ if not proj_act_types: proj_act_types = ["일반 업무"]
 proj_categories = settings[selected_project]["categories"]
 proj_tags = settings[selected_project]["tags"]
 
-# ==========================================
-# 5. 메뉴별 로직 분기
-# ==========================================
 if menu == "📊 대시보드 (업무 관리)":
     
     st.sidebar.markdown("### 📝 새로운 업무 등록")
-    with st.sidebar.form("new_task_form", clear_on_submit=True):
-        activity_type = st.selectbox("업무 유형 선택", proj_act_types)
-        main_cat = st.selectbox("대분류", list(proj_categories.keys()) if proj_categories else ["없음"])
-        sub_cat_options = proj_categories.get(main_cat, ["없음"]) if proj_categories else ["없음"]
-        sub_cat = st.selectbox("중분류", sub_cat_options)
+    # [오류 해결] st.sidebar.form 구조를 제거하여 실시간 연동(반응형)되도록 수정
+    activity_type = st.sidebar.selectbox("업무 유형 선택", proj_act_types, key="new_act_type")
+    main_cat = st.sidebar.selectbox("대분류", list(proj_categories.keys()) if proj_categories else ["없음"], key="new_main_cat")
+    
+    # 대분류 선택 시 실시간으로 옵션이 바뀝니다.
+    sub_cat_options = proj_categories.get(main_cat, ["없음"]) if proj_categories else ["없음"]
+    sub_cat = st.sidebar.selectbox("중분류", sub_cat_options, key="new_sub_cat")
+    
+    start_date = st.sidebar.date_input("시작일", date.today(), key="new_start_date")
+    target_date = st.sidebar.date_input("목표일", date.today(), key="new_target_date")
+    
+    if activity_type == "회의 진행":
+        location = st.sidebar.text_input("장소", key="new_loc")
+        people = st.sidebar.text_input("참석자 / 관련자", key="new_ppl")
+        content = st.sidebar.text_input("주제", key="new_content1")
+        note = st.sidebar.text_area("회의록 요약", key="new_note1")
+    else:
+        location = "-"
+        people = st.sidebar.text_input("관련자/송수신자", key="new_ppl2")
+        content = st.sidebar.text_area("내용", key="new_content2")
+        note = st.sidebar.text_input("비고", key="new_note2")
         
-        start_date = st.date_input("시작일", date.today())
-        target_date = st.date_input("목표일", date.today())
-        
-        location = st.text_input("장소")
-        people = st.text_input("참석자 / 관련자")
-        content = st.text_area("내용 / 주제")
-        note = st.text_area("회의록 및 비고")
-            
-        tags = st.multiselect("태그", proj_tags)
-        drive_link = st.text_input("자료 링크 🔗")
-        
-        existing_tasks = df[df['프로젝트'] == selected_project]['내용(주제)'].dropna().unique().tolist()
-        related_task = st.selectbox("관련 이전 메일/업무 (선택)", ["없음"] + existing_tasks)
-        
-        if st.form_submit_button("등록하기 (기본: 진행중)", use_container_width=True):
-            rel_val = related_task if related_task != "없음" else ""
-            new_row = {
-                "프로젝트": selected_project, "업무유형": activity_type,
-                "대분류": main_cat, "중분류": sub_cat, 
-                "시작일": pd.to_datetime(start_date), "목표일": pd.to_datetime(target_date), "실제완료일": pd.NaT,
-                "장소": location, "관련자(참석자/송수신자)": people, "내용(주제)": content, 
-                "회의록_및_비고": note, "태그": ", ".join(tags), "상태": "진행중", "드라이브_링크": drive_link, "연관업무ID": rel_val
-            }
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            save_data(df)
-            st.rerun()
+    tags = st.sidebar.multiselect("태그", proj_tags, key="new_tags")
+    drive_link = st.sidebar.text_input("자료 링크 🔗", key="new_link")
+    
+    existing_tasks = df[df['프로젝트'] == selected_project]['내용(주제)'].dropna().unique().tolist()
+    related_task = st.sidebar.selectbox("관련 이전 메일/업무 (선택)", ["없음"] + existing_tasks, key="new_related")
+    
+    if st.sidebar.button("등록하기 (기본: 진행중)", use_container_width=True, type="primary"):
+        rel_val = related_task if related_task != "없음" else ""
+        new_row = {
+            "프로젝트": selected_project, "업무유형": activity_type,
+            "대분류": main_cat, "중분류": sub_cat, 
+            "시작일": pd.to_datetime(start_date), "목표일": pd.to_datetime(target_date), "실제완료일": pd.NaT,
+            "장소": location, "관련자(참석자/송수신자)": people, "내용(주제)": content, 
+            "회의록_및_비고": note, "태그": ", ".join(tags), "상태": "진행중", "드라이브_링크": drive_link, "연관업무ID": rel_val
+        }
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        save_data(df)
+        st.sidebar.success("성공적으로 등록되었습니다.")
+        st.rerun()
 
     project_df = df[df['프로젝트'] == selected_project].copy()
     
@@ -359,40 +354,42 @@ if menu == "📊 대시보드 (업무 관리)":
             st.markdown("---")
             st.subheader("📝 선택한 업무 상세 보기 및 전체 수정")
             
-            with st.form("edit_form"):
+            # [오류 해결] 편집 창에서도 폼 구조를 제거하여 분류가 실시간 연동되도록 수정
+            with st.container(border=True):
                 col_e1, col_e2, col_e3 = st.columns(3)
-                edit_status = col_e1.selectbox("상태", ["진행중", "미정", "완료", "지연"], index=["진행중", "미정", "완료", "지연"].index(task_data['상태']))
+                edit_status = col_e1.selectbox("상태", ["진행중", "미정", "완료", "지연"], index=["진행중", "미정", "완료", "지연"].index(task_data['상태']), key="edit_status")
                 
                 type_idx = proj_act_types.index(task_data['업무유형']) if task_data['업무유형'] in proj_act_types else 0
-                edit_type = col_e2.selectbox("업무유형", proj_act_types, index=type_idx)
+                edit_type = col_e2.selectbox("업무유형", proj_act_types, index=type_idx, key="edit_type")
                 
                 s_date = task_data['시작일'] if pd.notna(task_data['시작일']) else date.today()
                 t_date = task_data['목표일'] if pd.notna(task_data['목표일']) else date.today()
                 r_date = task_data['실제완료일'] if pd.notna(task_data['실제완료일']) else None
                 
-                edit_s_date = col_e1.date_input("시작일", s_date)
-                edit_t_date = col_e2.date_input("목표일", t_date)
-                edit_r_date = col_e3.date_input("실제완료일", value=r_date)
+                edit_s_date = col_e1.date_input("시작일", s_date, key="edit_s_date")
+                edit_t_date = col_e2.date_input("목표일", t_date, key="edit_t_date")
+                edit_r_date = col_e3.date_input("실제완료일", value=r_date, key="edit_r_date")
 
                 col_e4, col_e5 = st.columns(2)
                 main_cat_idx = list(proj_categories.keys()).index(task_data['대분류']) if task_data['대분류'] in proj_categories else 0
-                edit_main_cat = col_e4.selectbox("대분류", list(proj_categories.keys()), index=main_cat_idx)
+                edit_main_cat = col_e4.selectbox("대분류", list(proj_categories.keys()), index=main_cat_idx, key="edit_main_cat")
                 
+                # 수정 창에서도 대분류 변경 시 중분류 리스트가 즉각 연동됩니다.
                 sub_cats = proj_categories.get(edit_main_cat, ["없음"])
                 sub_cat_idx = sub_cats.index(task_data['중분류']) if task_data['중분류'] in sub_cats else 0
-                edit_sub_cat = col_e5.selectbox("중분류", sub_cats, index=sub_cat_idx)
+                edit_sub_cat = col_e5.selectbox("중분류", sub_cats, index=sub_cat_idx, key="edit_sub_cat")
                 
-                edit_loc = st.text_input("장소", str(task_data['장소']) if pd.notna(task_data['장소']) else "")
-                edit_people = st.text_input("관련자(참석자/송수신자)", str(task_data['관련자(참석자/송수신자)']) if pd.notna(task_data['관련자(참석자/송수신자)']) else "")
-                edit_content = st.text_area("내용(주제)", str(task_data['내용(주제)']) if pd.notna(task_data['내용(주제)']) else "")
-                edit_note = st.text_area("회의록 및 비고", str(task_data['회의록_및_비고']) if pd.notna(task_data['회의록_및_비고']) else "", height=150)
-                edit_link = st.text_input("구글 드라이브 링크", str(task_data['드라이브_링크']) if pd.notna(task_data['드라이브_링크']) else "")
+                edit_loc = st.text_input("장소", str(task_data['장소']) if pd.notna(task_data['장소']) else "", key="edit_loc")
+                edit_people = st.text_input("관련자(참석자/송수신자)", str(task_data['관련자(참석자/송수신자)']) if pd.notna(task_data['관련자(참석자/송수신자)']) else "", key="edit_people")
+                edit_content = st.text_area("내용(주제)", str(task_data['내용(주제)']) if pd.notna(task_data['내용(주제)']) else "", key="edit_content")
+                edit_note = st.text_area("회의록 및 비고", str(task_data['회의록_및_비고']) if pd.notna(task_data['회의록_및_비고']) else "", height=150, key="edit_note")
+                edit_link = st.text_input("구글 드라이브 링크", str(task_data['드라이브_링크']) if pd.notna(task_data['드라이브_링크']) else "", key="edit_link")
                 
                 current_tags = [t.strip() for t in str(task_data['태그']).split(",")] if pd.notna(task_data['태그']) and task_data['태그'] else []
                 valid_tags = [t for t in current_tags if t in proj_tags]
-                edit_tags = st.multiselect("태그", proj_tags, default=valid_tags)
+                edit_tags = st.multiselect("태그", proj_tags, default=valid_tags, key="edit_tags")
                 
-                if st.form_submit_button("변경 사항 저장", type="primary"):
+                if st.button("변경 사항 저장", type="primary"):
                     df.at[actual_idx, '상태'] = edit_status
                     df.at[actual_idx, '업무유형'] = edit_type
                     df.at[actual_idx, '대분류'] = edit_main_cat
@@ -485,7 +482,6 @@ elif menu == "📩 이메일 연동함":
                     m_related = st.selectbox("관련 이전 업무", ["없음"] + existing_tasks)
                     
                     if st.form_submit_button("일정으로 등록"):
-                        
                         m_type = "메일/자료 송수신" if "메일/자료 송수신" in proj_act_types else proj_act_types[0]
                         m_cat = list(proj_categories.keys())[0] if proj_categories else "없음"
                         m_sub = proj_categories[m_cat][0] if m_cat != "없음" and proj_categories[m_cat] else "없음"
@@ -530,7 +526,6 @@ elif menu == "⚙️ 관리자 설정 (분류/백업)":
                     
     st.markdown("---")
     
-    # [핵심] 항목 나열 및 자유로운 편집, 삭제, 추가 기능 적용 (Data Editor)
     st.subheader(f"🛠️ [{selected_project}] 업무유형, 분류, 태그 관리")
     st.info("💡 아래 표의 빈 칸을 클릭해 새로운 항목을 자유롭게 추가하거나 기존 텍스트를 바로 수정하세요. 행 가장 왼쪽의 영역을 선택하고 키보드 Delete 키를 누르면 삭제됩니다.")
     
