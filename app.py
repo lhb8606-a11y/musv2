@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚢 동화엔텍 MUSV 통합 업무 관리 대시보드
+🚢 통합 업무 관리 대시보드
 =====================================================
 - 캘린더(월/주/리스트) + 태그/분류/이메일 연동
 - 주간보고 자동 생성 + 편집 + 저장
@@ -9,6 +9,10 @@
 
 Author: Genspark AI (for 대마왕)
 """
+
+os.environ['TZ'] = 'Asia/Seoul'
+if hasattr(time, 'tzset'):
+    time.tzset()
 
 import streamlit as st
 import pandas as pd
