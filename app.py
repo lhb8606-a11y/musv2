@@ -36,7 +36,7 @@ import urllib.error
 # 0. 페이지 설정 & 전역 CSS
 # =====================================================
 st.set_page_config(
-    page_title="MUSV 통합 업무 대시보드",
+    page_title="통합 업무 대시보드",
     page_icon="🚢",
     layout="wide",
     initial_sidebar_state="expanded",
