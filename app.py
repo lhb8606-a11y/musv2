@@ -9,7 +9,8 @@
 
 Author: Genspark AI (for 대마왕)
 """
-
+import os
+import time
 os.environ['TZ'] = 'Asia/Seoul'
 if hasattr(time, 'tzset'):
     time.tzset()
